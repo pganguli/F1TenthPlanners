@@ -597,20 +597,22 @@ function run_map(map_name; speed=5.0, laps=1, pose=nothing, map_ext=".png", rend
     speed_cfg = SpeedConfig(cruise=speed)
 
     render && add_render_callback!(env, e -> render_callback(e, env, perceive))
-    obs, _, done, _ = reset!(env, [pose[1] pose[2] pose[3]])
+    obs, _, _, _ = reset!(env, [pose[1] pose[2] pose[3]])
     render && render!(env)
 
     t, dist, steps, single = 0.0, 0.0, 0, 0
     sum_off, max_off, sum_e2, sum_ψ2 = 0.0, 0.0, 0.0, 0.0
     hint = 0
     start = time()
-    while !done && obs.lap_counts[1] < laps && t < max_time
+    # The env reports `done` after 2 laps (as in Python), so stop on our own
+    # lap count, or on a crash.
+    while obs.collisions[1] == 0 && obs.lap_counts[1] < laps && t < max_time
         x, y, θ = obs.poses_x[1], obs.poses_y[1], obs.poses_theta[1]
         v, r = obs.linear_vels_x[1], obs.ang_vels_z[1]
 
         lane = track!(tracker, estimate_lane!(perceive, obs.scans[1]), v, r, dt)
         steer = steering_angle(stanley, lane.e, lane.ψe, v; yaw_rate=r, path_yaw_rate=lane.κ * v)
-        obs, step_time, done, _ = step!(env, [steer target_speed(speed_cfg, lane)])
+        obs, step_time, _, _ = step!(env, [steer target_speed(speed_cfg, lane)])
         render && render!(env; mode=:human_fast)
 
         t += step_time
