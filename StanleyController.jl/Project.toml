@@ -1,0 +1,14 @@
+name = "StanleyController"
+uuid = "6c722594-8a4a-4272-af8d-909386d35611"
+version = "0.1.0"
+authors = ["Prateek Ganguli <prateek.ganguli@gmail.com>"]
+
+[compat]
+Test = "1"
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
