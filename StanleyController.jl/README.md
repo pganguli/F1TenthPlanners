@@ -73,9 +73,22 @@ Each step, the scan is turned into the Stanley inputs:
    in order along the wall, trace the lane center.
 4. Smooth the midpoints into a local `Path` and call `tracking_error` at the
    front axle to get `e`, `ψe` and the curvature.
+5. Combine this with the earlier scans in an unscented Kalman filter (Wan and
+   van der Merwe, 2000, from [KalmanFilters.jl](https://github.com/JuliaGNSS/KalmanFilters.jl)).
+   Between scans it predicts how `e`, `ψe` and the curvature change from the
+   car's speed and yaw rate, then moves part of the way toward the new scan.
+
+Without step 5, the heading error from a single scan is off by about 4°. The
+Stanley law passes that straight to the wheels, and since the sideways jolt
+grows with the square of speed, the car twitches at higher speeds. Turns show
+up in the yaw rate first, so the filter predicts them instead of lagging behind.
+A scan far from the prediction is ignored, unless that keeps happening (for
+example, a wall came into view). Then the filter restarts from the scan.
 
 Speed is the cruise speed, capped by `curvature_speed` using the largest
-curvature in the next 4 m, and by the free distance straight ahead.
+curvature in the next 4 m, and by the free distance straight ahead. That
+curvature profile is also averaged over scans, which stops noise from
+slowing the car on straights.
 
 The script handles three edge cases:
 
@@ -89,8 +102,9 @@ The script handles three edge cases:
   the car on the start line and to score the run.
 
 On all 23 f1tenth_racetracks maps, every run finishes a lap at cruise speeds
-of 3, 5 and 7 m/s with no wall contact. The car's average distance from the
-centerline is 2–5 cm, and the largest is under 0.22 m. The one exception is
+of 3, 5, 7, 10 and 15 m/s with no wall contact. The car's average distance
+from the centerline is 2–5 cm, the largest is under 0.2 m, and the heading
+error estimate is off by about 1.6° on average. The one exception is
 Shanghai's hairpin, where the map's rounded end is much wider than the track
 and the car passes up to 0.78 m from the reference line.
 

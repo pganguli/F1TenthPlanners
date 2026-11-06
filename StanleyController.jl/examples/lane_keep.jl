@@ -7,7 +7,9 @@
 #   ψe  heading error: the lane direction relative to the car [rad]
 #
 # plus the lane curvature ahead and the free distance straight ahead, which
-# set the speed (a fixed cruise speed, lower in turns). The controller never
+# set the speed (a fixed cruise speed, lower in turns). An unscented Kalman
+# filter combines each scan with the earlier ones and the car's own speed and
+# yaw rate, which removes most of the scan noise. The controller never
 # sees the car's pose or the map. For the f1tenth_racetracks maps the track's
 # centerline file is used only to place the car at the start line and to
 # score how well it stays centered.
@@ -20,6 +22,8 @@
 #     julia --project=examples -e 'using Pkg; Pkg.instantiate()'
 
 using F1Tenth
+using KalmanFilters
+using LinearAlgebra
 using StanleyController
 using Printf
 
@@ -105,7 +109,9 @@ What the perception hands to the controller: cross-track error `e`, heading
 error `ψe` and lane curvature `κ` at the front axle, the largest curvature in
 the next `preview` meters `κ_ahead`, the lane width, which walls were used
 (`:both`; `:left` or `:right` alone; `:merged`, one wall seen on both sides;
-or `:none`) and the free distance straight ahead of the front axle.
+or `:none`), the free distance straight ahead of the front axle, and the
+signed curvature every `PROFILE_STEP` meters ahead of the axle (NaN where the
+scan doesn't reach).
 """
 struct LaneEstimate
     e::Float64
@@ -115,6 +121,7 @@ struct LaneEstimate
     width::Float64
     walls::Symbol
     clearance::Float64
+    κ_profile::Vector{Float64}
 end
 
 mutable struct LanePerception
@@ -288,11 +295,12 @@ function _point_at(path::Path, s)
 end
 
 # Curvature of the circle through the path's points at s - base/2, s and
-# s + base/2 (positive turning left). Much less sensitive to noise in the
-# points than differencing headings.
+# s + base/2 (positive turning left), or NaN when less than half of that
+# stretch is on the path. Much less sensitive to noise in the points than
+# differencing headings.
 function _curvature_at(path::Path, s, base)
     lo, hi = max(s - base / 2, 0.0), min(s + base / 2, path.s[end])
-    hi - lo < base / 2 && return 0.0
+    hi - lo < base / 2 && return NaN
     a, b, c = _point_at(path, lo), _point_at(path, (lo + hi) / 2), _point_at(path, hi)
     cross = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1])
     return 2cross / (hypot(b[1] - a[1], b[2] - a[2]) * hypot(c[1] - b[1], c[2] - b[2]) * hypot(c[1] - a[1], c[2] - a[2]))
@@ -341,25 +349,174 @@ function estimate_lane!(p::LanePerception, ranges)
     end
     p.cx, p.cy = cx, cy
     if length(cx) < 3 || _polyline_length(cx, cy) < cfg.min_length
-        return LaneEstimate(0.0, 0.0, 0.0, 0.0, p.width, :none, clearance)
+        return LaneEstimate(0.0, 0.0, 0.0, 0.0, p.width, :none, clearance, fill(NaN, length(_profile_offsets(cfg))))
     end
 
     center = Path(cx, cy)
     err = tracking_error(center, p.x_fa, 0.0, 0.0)   # the car frame: axle on the x axis, heading 0
-    κ = _curvature_at(center, err.s, cfg.curve_base)
-    κ_ahead = abs(κ)
-    for s in err.s:0.25:min(err.s + cfg.preview, center.s[end])
-        κ_ahead = max(κ_ahead, abs(_curvature_at(center, s, cfg.curve_base)))
-    end
     e, ψe = err.e, err.ψe
+    dir = 1   # +1 if the lane runs along the path, -1 if against it
     if walls === :merged && abs(wrap_angle(ψe - p.ψe_prev)) > π / 2
         # A wall wrapped around the car does not say which way the lane runs;
         # keep the direction of the previous step (reversing a path flips e
         # and κ and turns its heading by π).
-        e, ψe, κ = -e, wrap_angle(ψe + π), -κ
+        e, ψe, dir = -e, wrap_angle(ψe + π), -1
     end
     p.ψe_prev = ψe
-    return LaneEstimate(e, ψe, κ, κ_ahead, p.width, walls, clearance)
+    κ = _curvature_at(center, err.s, cfg.curve_base)
+    κ = isnan(κ) ? 0.0 : dir * κ
+    # signed curvature every PROFILE_STEP meters ahead, NaN past what the scan sees
+    profile = [dir * _curvature_at(center, err.s + dir * d, cfg.curve_base) for d in _profile_offsets(cfg)]
+    return LaneEstimate(e, ψe, κ, _sharpest(profile, κ), p.width, walls, clearance, profile)
+end
+
+const PROFILE_STEP = 0.25   # spacing of the curvature profile ahead [m]
+
+_profile_offsets(cfg::PerceptionConfig) = 0.0:PROFILE_STEP:cfg.preview
+
+# Largest |κ| in a profile, ignoring unknown (NaN) entries.
+_sharpest(profile, κ) = maximum((abs(k) for k in profile if !isnan(k)); init=abs(κ))
+
+# ---------------------------------------------------------------------------
+# Smoothing over time: an unscented Kalman filter
+#
+# Each scan's estimate is noisy (a few degrees of heading error), and the
+# Stanley law passes heading noise straight to the wheels. At speed the car
+# twitches, because the sideways jolt grows with v². Plain averaging over
+# scans would delay turns. Instead a Kalman filter tracks the lane state
+# x = (e, ψe, κ) with two steps per scan:
+#
+#   predict  how x changes until this scan, from the car's speed v and yaw
+#            rate r, which are measured and far less noisy than the scan:
+#              de/dt  = v⋅sin(ψe) − L⋅r⋅cos(ψe)   (L: wheelbase, no slip)
+#              dψe/dt = κ⋅v − r
+#              dκ/dt  = 0                        (changes count as noise)
+#   correct  move part of the way toward the scan. The filter works out how
+#            far from how uncertain the prediction is compared with the scan.
+#
+# The prediction is nonlinear (the sines and cosines), so it uses the
+# unscented Kalman filter (Wan and van der Merwe, 2000) from KalmanFilters.jl:
+# a few "sigma points" spread around the estimate are pushed through the
+# model, and their spread after it gives the new uncertainty.
+#
+# Turning into a corner shows up in r first, so it is predicted, not delayed.
+# A scan far from the prediction (measured in standard deviations) is
+# treated as an outlier and ignored. If that keeps happening, the lane really
+# changed (for example, a wall came into view) and the filter restarts from
+# the scan.
+#
+# The curvature ahead, which sets the speed, is averaged over scans too. Each
+# point of it stays where it is on the ground while the car drives past.
+
+"""
+    FilterConfig(; kwargs...)
+
+Noise levels for the Kalman filter. Distances in meters, angles in radians.
+"""
+Base.@kwdef struct FilterConfig
+    # Noise of one scan's estimate (standard deviations). Larger trusts the
+    # scans less: smoother, but slower to correct the prediction.
+    σ_e::Float64 = 0.03      # [m]
+    σ_ψ::Float64 = 0.06      # [rad]
+    σ_κ::Float64 = 0.03      # [1/m]
+    # What the prediction can't explain, as rates. Larger follows the scans
+    # more closely, with less smoothing.
+    q_e::Float64 = 0.3       # sideways speed from wheel slip [m/s]
+    q_ψ::Float64 = 0.5       # heading rate from slip [rad/s]
+    q_κ::Float64 = 0.5       # change of the lane's curvature per meter driven [1/m²]
+    # A scan more than this many standard deviations from the prediction is
+    # an outlier; after max_outliers in a row the filter restarts from the scan.
+    gate::Float64 = 4.0
+    max_outliers::Int = 3
+    # Weight of each new scan in the curvature ahead. Smaller removes more of
+    # the noise that slows the car on straights but registers a gentle turn
+    # later. A point that changes by more than gate_κ [1/m] (a sharp turn
+    # coming into view) is taken as it is.
+    curve_gain::Float64 = 0.25
+    gate_κ::Float64 = 0.15
+end
+
+mutable struct LaneFilter
+    cfg::FilterConfig
+    wheelbase::Float64            # rear to front axle [m]
+    ready::Bool
+    x::Vector{Float64}            # e, ψe, κ (ψe not wrapped, so the sigma points stay continuous)
+    P::Matrix{Float64}            # their covariance
+    outliers::Int                 # outliers in a row
+    profile::Vector{Float64}      # signed curvature ahead, as in LaneEstimate
+end
+
+LaneFilter(wheelbase; cfg=FilterConfig()) = LaneFilter(cfg, wheelbase, false, zeros(3), zeros(3, 3), 0, Float64[])
+
+_scan_noise(c::FilterConfig) = Diagonal([c.σ_e, c.σ_ψ, c.σ_κ] .^ 2)
+
+function _restart!(f::LaneFilter, lane::LaneEstimate)
+    f.x = [lane.e, lane.ψe, lane.κ]
+    f.P = Matrix(_scan_noise(f.cfg))
+    f.profile = copy(lane.κ_profile)
+    f.outliers = 0
+    f.ready = true
+    return f
+end
+
+"""
+    track!(f::LaneFilter, lane::LaneEstimate, v, yaw_rate, dt) -> LaneEstimate
+
+`lane` combined with the earlier scans. `v` and `yaw_rate` are the car's
+speed [m/s] and yaw rate [rad/s], and `dt` the time since the last scan [s].
+"""
+function track!(f::LaneFilter, lane::LaneEstimate, v, yaw_rate, dt)
+    c = f.cfg
+    if !f.ready
+        lane.walls === :none || _restart!(f, lane)
+        return lane
+    end
+    # predict
+    L = f.wheelbase
+    motion((e, ψe, κ)) = [e + (v * sin(ψe) - L * yaw_rate * cos(ψe)) * dt, ψe + (κ * v - yaw_rate) * dt, κ]
+    Q = Diagonal([c.q_e * dt, c.q_ψ * dt, c.q_κ * abs(v) * dt] .^ 2)
+    tu = time_update(f.x, f.P, motion, Q)
+    x, P = get_state(tu), get_covariance(tu)
+    profile = _shift(f.profile, v * dt)   # the car moved forward along the lane
+    if lane.walls !== :none               # correct (with no lane in view, keep the prediction)
+        # the scan measures x directly; its heading is unwrapped to be near the prediction
+        z = [lane.e, x[2] + wrap_angle(lane.ψe - x[2]), lane.κ]
+        mu = measurement_update(x, P, z, Matrix(1.0I, 3, 3), _scan_noise(c))
+        if calc_nis(mu) > c.gate^2        # squared distance in standard deviations
+            f.outliers += 1
+            if f.outliers >= c.max_outliers
+                _restart!(f, lane)
+                return lane
+            end
+        else
+            f.outliers = 0
+            x, P = get_state(mu), get_covariance(mu)
+        end
+        for j in eachindex(profile)
+            z = lane.κ_profile[j]
+            isnan(z) && continue                         # not in this scan: keep the old value
+            profile[j] = isnan(profile[j]) || abs(z - profile[j]) > c.gate_κ ? z :
+                         profile[j] + c.curve_gain * (z - profile[j])
+        end
+    end
+    f.x, f.P, f.profile = x, P, profile
+    ψe = wrap_angle(x[2])
+    return LaneEstimate(x[1], ψe, x[3], _sharpest(profile, x[3]), lane.width, lane.walls, lane.clearance, profile)
+end
+
+# A profile sampled every PROFILE_STEP meters, moved d meters toward the car
+# (linear interpolation; NaN where nothing was known).
+function _shift(profile, d)
+    n = length(profile)
+    out = fill(NaN, n)
+    for j in 1:n
+        u = 1 + (j - 1) + d / PROFILE_STEP   # position in the old profile
+        i = floor(Int, u)
+        i > n && break
+        a, b = profile[i], profile[min(i + 1, n)]
+        out[j] = isnan(a) ? b : isnan(b) ? a : a + (u - i) * (b - a)
+    end
+    return out
 end
 
 # ---------------------------------------------------------------------------
@@ -425,15 +582,18 @@ end
 default_stanley() = Stanley(k=6.0, k_soft=1.0, k_yaw=0.05, max_steer=VehicleParams().s_max)
 
 function run_map(map_name; speed=5.0, laps=1, pose=nothing, map_ext=".png", render=false,
-                 stanley=default_stanley(), perception=PerceptionConfig(), max_time=600.0)
+                 stanley=default_stanley(), perception=PerceptionConfig(), smoothing=FilterConfig(),
+                 max_time=600.0)
     params = VehicleParams()
     path = centerline(map_name)
     if pose === nothing
         path === nothing && error("$map_name is not a racetrack; give a start pose with --pose X Y THETA")
         pose = (path.x[1], path.y[1], path.heading[1])
     end
-    env = F110Env(map=map_name, map_ext=map_ext, num_agents=1, timestep=0.01, integrator=Integrator.RK4)
+    dt = 0.01
+    env = F110Env(map=map_name, map_ext=map_ext, num_agents=1, timestep=dt, integrator=Integrator.RK4)
     perceive = LanePerception(1080, 4.7, params.lf - env.lidar_dist; cfg=perception)
+    tracker = LaneFilter(params.lf + params.lr; cfg=smoothing)
     speed_cfg = SpeedConfig(cruise=speed)
 
     render && add_render_callback!(env, e -> render_callback(e, env, perceive))
@@ -448,7 +608,7 @@ function run_map(map_name; speed=5.0, laps=1, pose=nothing, map_ext=".png", rend
         x, y, θ = obs.poses_x[1], obs.poses_y[1], obs.poses_theta[1]
         v, r = obs.linear_vels_x[1], obs.ang_vels_z[1]
 
-        lane = estimate_lane!(perceive, obs.scans[1])
+        lane = track!(tracker, estimate_lane!(perceive, obs.scans[1]), v, r, dt)
         steer = steering_angle(stanley, lane.e, lane.ψe, v; yaw_rate=r, path_yaw_rate=lane.κ * v)
         obs, step_time, done, _ = step!(env, [steer target_speed(speed_cfg, lane)])
         render && render!(env; mode=:human_fast)
