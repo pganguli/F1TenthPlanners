@@ -1,14 +1,16 @@
 # Smoothing over time: an unscented Kalman filter
 #
-# Each scan's estimate is noisy (a few degrees of heading error), and the
-# Stanley law passes heading noise straight to the wheels. At speed the car
-# twitches, because the sideways jolt grows with v². Plain averaging over
-# scans would delay turns. Instead a Kalman filter tracks the lane state
+# Each scan's estimate is noisy (a few degrees of heading error). A
+# controller acting on it directly makes the vehicle twitch, more so at
+# speed, since the sideways jolt grows with v². Plain averaging over scans
+# would delay turns. Instead a Kalman filter tracks the lane state
 # x = (e, ψe, κ) with two steps per scan:
 #
-#   predict  how x changes until this scan, from the car's speed v and yaw
-#            rate r, which are measured and far less noisy than the scan:
-#              de/dt  = v⋅sin(ψe) − L⋅r⋅cos(ψe)   (L: wheelbase, no slip)
+#   predict  how x changes until this scan, from the vehicle's speed v and
+#            yaw rate r, which are measured and far less noisy than the scan:
+#              de/dt  = v⋅sin(ψe) − d⋅r⋅cos(ψe)
+#            (d: the reference point's distance ahead of the rear axle,
+#            which moves sideways at d⋅r when the rear wheels don't slip)
 #              dψe/dt = κ⋅v − r
 #              dκ/dt  = 0                        (changes count as noise)
 #   correct  move part of the way toward the scan. The filter works out how
@@ -25,8 +27,8 @@
 # changed (for example, a wall came into view) and the filter restarts from
 # the scan.
 #
-# The curvature ahead, which sets the speed, is averaged over scans too. Each
-# point of it stays where it is on the ground while the car drives past.
+# The curvature profile ahead is averaged over scans too. Each point of it
+# stays where it is on the ground while the vehicle drives past.
 
 """
     FilterConfig(; kwargs...)
@@ -48,23 +50,25 @@ Base.@kwdef struct FilterConfig
     # an outlier; after max_outliers in a row the filter restarts from the scan.
     gate::Float64 = 4.0
     max_outliers::Int = 3
-    # Weight of each new scan in the curvature ahead. Smaller removes more of
-    # the noise that slows the car on straights but registers a gentle turn
-    # later. A point that changes by more than gate_κ [1/m] (a sharp turn
+    # Weight of each new scan in the curvature profile ahead. Smaller removes
+    # more noise (which reads as false curves on straights) but registers a
+    # gentle turn later. A point that changes by more than gate_κ [1/m] (a sharp turn
     # coming into view) is taken as it is.
     curve_gain::Float64 = 0.25
     gate_κ::Float64 = 0.15
 end
 
 """
-    LaneFilter(wheelbase; cfg=FilterConfig())
+    LaneFilter(ref_offset; cfg=FilterConfig())
 
-Kalman filter over the lane estimates of a vehicle with this `wheelbase`
-(rear to front axle) [m]. Feed it every scan's estimate with [`track!`](@ref).
+Kalman filter over the lane estimates. `ref_offset` is how far the reference
+point (where [`LanePerception`](@ref) measures the errors) is ahead of the
+rear axle [m]: the wheelbase for the front axle, 0 for the rear axle. Feed
+it every scan's estimate with [`track!`](@ref).
 """
 mutable struct LaneFilter
     cfg::FilterConfig
-    wheelbase::Float64            # rear to front axle [m]
+    ref_offset::Float64           # reference point, meters ahead of the rear axle
     ready::Bool
     x::Vector{Float64}            # e, ψe, κ (ψe not wrapped, so the sigma points stay continuous)
     P::Matrix{Float64}            # their covariance
@@ -72,7 +76,7 @@ mutable struct LaneFilter
     profile::Vector{Float64}      # signed curvature ahead, as in LaneEstimate
 end
 
-LaneFilter(wheelbase; cfg=FilterConfig()) = LaneFilter(cfg, wheelbase, false, zeros(3), zeros(3, 3), 0, Float64[])
+LaneFilter(ref_offset::Real; cfg::FilterConfig=FilterConfig()) = LaneFilter(cfg, ref_offset, false, zeros(3), zeros(3, 3), 0, Float64[])
 
 _scan_noise(c::FilterConfig) = Diagonal([c.σ_e, c.σ_ψ, c.σ_κ] .^ 2)
 
@@ -88,8 +92,9 @@ end
 """
     track!(f::LaneFilter, lane::LaneEstimate, v, yaw_rate, dt) -> LaneEstimate
 
-`lane` combined with the earlier scans. `v` and `yaw_rate` are the car's
-speed [m/s] and yaw rate [rad/s], and `dt` the time since the last scan [s].
+`lane` combined with the earlier scans. `v` and `yaw_rate` are the
+vehicle's speed [m/s] and yaw rate [rad/s] (counterclockwise), and `dt` the
+time since the last scan [s].
 """
 function track!(f::LaneFilter, lane::LaneEstimate, v, yaw_rate, dt)
     c = f.cfg
@@ -98,15 +103,15 @@ function track!(f::LaneFilter, lane::LaneEstimate, v, yaw_rate, dt)
         return lane
     end
     # predict
-    L = f.wheelbase
-    motion((e, ψe, κ)) = [e + (v * sin(ψe) - L * yaw_rate * cos(ψe)) * dt, ψe + (κ * v - yaw_rate) * dt, κ]
+    d = f.ref_offset
+    motion((e, ψe, κ)) = [e + (v * sin(ψe) - d * yaw_rate * cos(ψe)) * dt, ψe + (κ * v - yaw_rate) * dt, κ]
     Q = Diagonal([c.q_e * dt, c.q_ψ * dt, c.q_κ * abs(v) * dt] .^ 2)
     tu = time_update(f.x, f.P, motion, Q)
     x, P = get_state(tu), get_covariance(tu)
-    profile = _shift(f.profile, v * dt)   # the car moved forward along the lane
+    profile = _shift(f.profile, v * dt)   # the vehicle moved forward along the lane
     if lane.walls !== :none               # correct (with no lane in view, keep the prediction)
         # the scan measures x directly; its heading is unwrapped to be near the prediction
-        z = [lane.e, x[2] + wrap_angle(lane.ψe - x[2]), lane.κ]
+        z = [lane.e, x[2] + _wrap(lane.ψe - x[2]), lane.κ]
         mu = measurement_update(x, P, z, Matrix(1.0I, 3, 3), _scan_noise(c))
         if calc_nis(mu) > c.gate^2        # squared distance in standard deviations
             f.outliers += 1
@@ -126,11 +131,11 @@ function track!(f::LaneFilter, lane::LaneEstimate, v, yaw_rate, dt)
         end
     end
     f.x, f.P, f.profile = x, P, profile
-    ψe = wrap_angle(x[2])
+    ψe = _wrap(x[2])
     return LaneEstimate(x[1], ψe, x[3], _sharpest(profile, x[3]), lane.width, lane.walls, lane.clearance, profile)
 end
 
-# A profile sampled every PROFILE_STEP meters, moved d meters toward the car
+# A profile sampled every PROFILE_STEP meters, moved d meters toward the vehicle
 # (linear interpolation; NaN where nothing was known).
 function _shift(profile, d)
     n = length(profile)

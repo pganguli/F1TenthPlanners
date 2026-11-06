@@ -10,8 +10,7 @@
         p = LanePerception(1080, 4.7, 0.16)
         f = LaneFilter(0.33)
         for ranges in (corridor, corridor, one_wall, corridor)
-            lane = track!(f, estimate_lane!(p, ranges), 5.0, 0.1, 0.01)
-            target_speed(SpeedConfig(), lane)
+            track!(f, estimate_lane!(p, ranges), 5.0, 0.1, 0.01)
         end
     end
 end

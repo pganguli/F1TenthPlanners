@@ -2,13 +2,13 @@
 #
 # 1. Scan to points in the vehicle frame.
 # 2. Split the points into the left and the right wall: each wall starts at
-#    the nearest return beside the car and is followed beam by beam until a
-#    gap, so a wall that curves across the front of the car stays one wall.
+#    the nearest return beside the vehicle and is followed beam by beam until a
+#    gap, so a wall that curves across the front of the vehicle stays one wall.
 # 3. Pair each point of a wall with the nearest point of the other wall; the
 #    midpoints, taken in order along the wall, trace the lane center.
-# 4. Smooth them into a local path and measure the car against it with
-#    `tracking_error`, exactly as for a path known in advance. Nothing assumes
-#    the lane is straight or gently curved, so hairpins work too.
+# 4. Smooth them into a center line and measure the reference point against
+#    it. Nothing assumes the lane is straight or gently curved, so hairpins
+#    work too.
 
 """
     PerceptionConfig(; kwargs...)
@@ -49,26 +49,37 @@ Base.@kwdef struct PerceptionConfig
     # Larger is less noisy (false slowdowns on straights) but blurs short,
     # sharp turns, so they look gentler than they are.
     curve_base::Float64 = 2.0
-    # The car slows for the sharpest curve within this distance ahead [m].
-    # Larger brakes earlier for turns; too large reaches past what the scan sees.
+    # `κ_ahead` is the sharpest curve within this distance ahead [m]. A
+    # controller that slows for it brakes earlier for turns with a larger
+    # value; too large reaches past what the scan sees.
     preview::Float64 = 4.0
-    # Half-width of the corridor straight ahead checked for a wall [m]; caps
-    # speed by the braking distance. Larger is more cautious (it catches the
-    # walls beside the car); smaller can miss a wall the car's corner will hit.
+    # Half-width of the corridor straight ahead in which `clearance` is
+    # measured [m], about half the vehicle's width. Larger is more cautious
+    # (it catches the walls beside the vehicle); smaller can miss a wall its
+    # corner will hit.
     car_halfwidth::Float64 = 0.2
 end
 
 """
     LaneEstimate
 
-Where the vehicle is in the lane: cross-track error `e` (`> 0` when the lane
-center is to the left), heading error `ψe` (`> 0` when the lane points
-left) and lane curvature `κ` (`> 0` turning left) at the front axle, the largest curvature in
-the next `preview` meters `κ_ahead`, the lane width, which walls were used
-(`:both`; `:left` or `:right` alone; `:merged`, one wall seen on both sides;
-or `:none`), the free distance straight ahead of the front axle, and the
-signed curvature every `PROFILE_STEP` meters ahead of the axle (NaN where the
-scan doesn't reach).
+Where the vehicle is in the lane, all measured at the reference point (see
+[`LanePerception`](@ref)):
+
+- `e`: cross-track error [m], the distance to the lane center line; `> 0`
+  when the center line is to the left.
+- `ψe`: heading error [rad], the lane's direction minus the vehicle's; `> 0`
+  when the lane points to the left.
+- `κ`: the lane's curvature [1/m]; `> 0` turning left.
+- `κ_ahead`: the largest `|κ|` within `preview` meters ahead.
+- `width`: the lane width [m] (a long-running median), NaN until both walls
+  have been seen.
+- `walls`: which walls were used: `:both`; `:left` or `:right` alone (the
+  center is half a lane width in from it); `:merged`, one wall seen on both
+  sides, deep in a hairpin; or `:none`, when the other numbers are zero.
+- `clearance`: the free distance straight ahead [m].
+- `κ_profile`: the signed curvature every `PROFILE_STEP` meters ahead, NaN
+  where the scan doesn't reach.
 """
 struct LaneEstimate
     e::Float64
@@ -82,26 +93,32 @@ struct LaneEstimate
 end
 
 """
-    LanePerception(angles, x_fa; cfg=PerceptionConfig())
-    LanePerception(num_beams, fov, x_fa; cfg=PerceptionConfig())
+    LanePerception(angles, x_ref; cfg=PerceptionConfig())
+    LanePerception(num_beams, fov, x_ref; cfg=PerceptionConfig())
 
 Lane perception for a LiDAR whose beam `i` points at `angles[i]` [rad]
 (counterclockwise from straight ahead, in increasing order), or for
-`num_beams` beams spread evenly over the field of view `fov`. `x_fa` is how
-far the front axle is ahead of the LiDAR [m]; the errors are measured there.
+`num_beams` beams spread evenly over the field of view `fov`.
+
+The errors are measured at the reference point `x_ref` meters ahead of the
+LiDAR (negative if behind it), on the vehicle's center line. Use the point
+your controller expects: the front axle for the Stanley law, the rear axle
+for pure pursuit, or the center of gravity for most LQR and MPC models.
 
 After [`estimate_lane!`](@ref), the fields `cx` and `cy` hold the estimated
-lane center in the LiDAR frame, for drawing.
+lane center line in the LiDAR frame (x forward, y left), in driving order,
+for controllers that work on the line itself (such as pure pursuit) or for
+drawing.
 """
 mutable struct LanePerception
     cfg::PerceptionConfig
     angles::Vector{Float64}
-    x_fa::Float64                 # front axle, meters ahead of the scan origin
-    xs::Vector{Float64}           # scan points in the car frame
+    x_ref::Float64                # reference point, meters ahead of the LiDAR
+    xs::Vector{Float64}           # scan points in the LiDAR frame
     ys::Vector{Float64}
     left::Vector{Int}             # beam indices of each wall, in driving order
     right::Vector{Int}
-    cx::Vector{Float64}           # estimated lane center (car frame), for drawing
+    cx::Vector{Float64}           # estimated lane center line (LiDAR frame)
     cy::Vector{Float64}
     widths::Vector{Float64}       # recent lane width measurements (a ring buffer)
     width_next::Int
@@ -110,18 +127,18 @@ mutable struct LanePerception
     ψe_prev::Float64              # last heading error, to keep a one-wall lane's direction
 end
 
-function LanePerception(angles::AbstractVector{<:Real}, x_fa::Real; cfg::PerceptionConfig=PerceptionConfig())
+function LanePerception(angles::AbstractVector{<:Real}, x_ref::Real; cfg::PerceptionConfig=PerceptionConfig())
     n = length(angles)
     n >= 2 || throw(ArgumentError("need at least 2 beams"))
     issorted(angles) || throw(ArgumentError("beam angles must be in increasing (counterclockwise) order"))
-    return LanePerception(cfg, collect(Float64, angles), x_fa, zeros(n), zeros(n), Int[], Int[],
+    return LanePerception(cfg, collect(Float64, angles), x_ref, zeros(n), zeros(n), Int[], Int[],
         Float64[], Float64[], Float64[], 1, NaN, false, 0.0)
 end
 
-LanePerception(num_beams::Integer, fov::Real, x_fa::Real; cfg::PerceptionConfig=PerceptionConfig()) =
-    LanePerception([-fov / 2 + (i - 1) * fov / (num_beams - 1) for i in 1:num_beams], x_fa; cfg)
+LanePerception(num_beams::Integer, fov::Real, x_ref::Real; cfg::PerceptionConfig=PerceptionConfig()) =
+    LanePerception([-fov / 2 + (i - 1) * fov / (num_beams - 1) for i in 1:num_beams], x_ref; cfg)
 
-# Nearest return beside the car on one side (`side` = 1 left, -1 right), or 0
+# Nearest return beside the vehicle on one side (`side` = 1 left, -1 right), or 0
 # if none is in range. The sector reaches back to the edge of the scan, so
 # the inner wall of a tight turn is kept for as long as it can be seen.
 function _seed(p::LanePerception, ranges, side)
@@ -151,7 +168,7 @@ end
 # Beams sweep counterclockwise, so the right wall runs forward with the beam
 # index and the left wall against it. If the right wall runs without a gap
 # into the left seed, both seeds are on one wall (deep in a hairpin, the
-# outer wall wraps around the car while the inner one is behind it, out of
+# outer wall wraps around the vehicle while the inner one is behind it, out of
 # view): it is kept whole in `right` and `merged` is set.
 function _walls!(p::LanePerception, ranges)
     empty!(p.left)
@@ -231,8 +248,8 @@ function _center_from_wall(p::LanePerception, chain, side)
         p.cfg.smooth, p.cfg.spacing)
     length(wx) < 2 && return wx, wy
     half = if isnan(p.width)
-        # never seen both walls: assume the car started centered
-        minimum(hypot(wx[k] - p.x_fa, wy[k]) for k in eachindex(wx))
+        # never seen both walls: assume the vehicle started centered
+        minimum(hypot(wx[k] - p.x_ref, wy[k]) for k in eachindex(wx))
     else
         p.width / 2
     end
@@ -260,26 +277,6 @@ function _record_width!(p::LanePerception, w)
     return p
 end
 
-# Point of the path at arc length s (clamped to the path).
-function _point_at(path::Path, s)
-    s = clamp(s, 0.0, path.s[end])
-    i = clamp(searchsortedlast(path.s, s), 1, length(path.seg_length))
-    t = (s - path.s[i]) / path.seg_length[i]
-    return (path.x[i] + t * (path.x[i+1] - path.x[i]), path.y[i] + t * (path.y[i+1] - path.y[i]))
-end
-
-# Curvature of the circle through the path's points at s - base/2, s and
-# s + base/2 (positive turning left), or NaN when less than half of that
-# stretch is on the path. Much less sensitive to noise in the points than
-# differencing headings.
-function _curvature_at(path::Path, s, base)
-    lo, hi = max(s - base / 2, 0.0), min(s + base / 2, path.s[end])
-    hi - lo < base / 2 && return NaN
-    a, b, c = _point_at(path, lo), _point_at(path, (lo + hi) / 2), _point_at(path, hi)
-    cross = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1])
-    return 2cross / (hypot(b[1] - a[1], b[2] - a[2]) * hypot(c[1] - b[1], c[2] - b[2]) * hypot(c[1] - a[1], c[2] - a[2]))
-end
-
 """
     estimate_lane!(p::LanePerception, ranges) -> LaneEstimate
 
@@ -294,7 +291,7 @@ function estimate_lane!(p::LanePerception, ranges::AbstractVector{<:Real})
         x, y = ranges[i] * cos(p.angles[i]), ranges[i] * sin(p.angles[i])
         p.xs[i], p.ys[i] = x, y
         if x > 0 && abs(y) <= cfg.car_halfwidth
-            clearance = min(clearance, x - p.x_fa)
+            clearance = min(clearance, x - p.x_ref)
         end
     end
     _walls!(p, ranges)
@@ -308,8 +305,8 @@ function estimate_lane!(p::LanePerception, ranges::AbstractVector{<:Real})
         lx, ly, mx, my, mw = _center_from(p, p.left, p.right)
         cx, cy = _polyline_length(rx, ry) >= _polyline_length(lx, ly) ? (rx, ry) : (lx, ly)
         walls = :both
-        # lane width from the pairs beside the front axle
-        near = [mw[k] for k in eachindex(mw) if hypot(mx[k] - p.x_fa, my[k]) <= 1.0]
+        # lane width from the pairs beside the reference point
+        near = [mw[k] for k in eachindex(mw) if hypot(mx[k] - p.x_ref, my[k]) <= 1.0]
         if !isempty(near)
             _record_width!(p, sort!(near)[cld(length(near), 2)])
         end
@@ -328,15 +325,15 @@ function estimate_lane!(p::LanePerception, ranges::AbstractVector{<:Real})
         return LaneEstimate(0.0, 0.0, 0.0, 0.0, p.width, :none, clearance, fill(NaN, length(_profile_offsets(cfg))))
     end
 
-    center = Path(cx, cy)
-    err = tracking_error(center, p.x_fa, 0.0, 0.0)   # the car frame: axle on the x axis, heading 0
-    e, ψe = err.e, err.ψe
+    center = _Polyline(cx, cy)
+    err = _project(center, p.x_ref, 0.0)   # the vehicle faces +x
+    e, ψe = err.e, err.h
     dir = 1   # +1 if the lane runs along the path, -1 if against it
-    if walls === :merged && abs(wrap_angle(ψe - p.ψe_prev)) > π / 2
-        # A wall wrapped around the car does not say which way the lane runs;
+    if walls === :merged && abs(_wrap(ψe - p.ψe_prev)) > π / 2
+        # A wall wrapped around the vehicle does not say which way the lane runs;
         # keep the direction of the previous step (reversing a path flips e
         # and κ and turns its heading by π).
-        e, ψe, dir = -e, wrap_angle(ψe + π), -1
+        e, ψe, dir = -e, _wrap(ψe + π), -1
     end
     p.ψe_prev = ψe
     κ = _curvature_at(center, err.s, cfg.curve_base)

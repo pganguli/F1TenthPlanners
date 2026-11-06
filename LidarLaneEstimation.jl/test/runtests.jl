@@ -1,9 +1,8 @@
 using LidarLaneEstimation
-using StanleyController: wrap_angle
 using Test
 
 const ANGLES = range(-2.35, 2.35; length=1080)
-const X_FA = 0.16          # front axle ahead of the LiDAR
+const X_REF = 0.16         # reference point (here the front axle) ahead of the LiDAR
 const MAX_RANGE = 30.0
 
 # A scan from the origin, looking along +x, of walls given as polylines.
@@ -30,38 +29,44 @@ arc(cx, cy, r, φ0, φ1; n=400) = [(cx + r * cos(φ), cy + r * sin(φ)) for φ i
 # Walls of a straight lane 2 m wide whose center passes `offset` to the left
 # of the front axle, running at heading `h`.
 function straight_lane(; offset=0.0, h=0.0)
-    cx, cy = X_FA - offset * sin(h), offset * cos(h)
+    cx, cy = X_REF - offset * sin(h), offset * cos(h)
     return [line(cx - sin(h), cy + cos(h), h), line(cx + sin(h), cy - cos(h), h)]
 end
 
 @testset "LidarLaneEstimation" begin
     @testset "constructors" begin
-        @test length(LanePerception(1080, 4.7, X_FA).angles) == 1080
-        @test LanePerception(collect(ANGLES), X_FA).angles ≈ LanePerception(1080, 4.7, X_FA).angles
-        @test_throws ArgumentError LanePerception([0.5, 0.0], X_FA)
-        @test_throws DimensionMismatch estimate_lane!(LanePerception(1080, 4.7, X_FA), zeros(10))
+        @test length(LanePerception(1080, 4.7, X_REF).angles) == 1080
+        @test LanePerception(collect(ANGLES), X_REF).angles ≈ LanePerception(1080, 4.7, X_REF).angles
+        @test_throws ArgumentError LanePerception([0.5, 0.0], X_REF)
+        @test_throws DimensionMismatch estimate_lane!(LanePerception(1080, 4.7, X_REF), zeros(10))
     end
 
     @testset "straight lane" begin
-        lane = estimate_lane!(LanePerception(ANGLES, X_FA), scan(straight_lane()))
+        lane = estimate_lane!(LanePerception(ANGLES, X_REF), scan(straight_lane()))
         @test lane.walls === :both
         @test abs(lane.e) < 0.02 && abs(lane.ψe) < 0.02 && abs(lane.κ) < 0.02
         @test lane.width ≈ 2.0 atol = 0.05
-        @test lane.clearance ≈ MAX_RANGE - X_FA atol = 0.01   # nothing ahead
+        @test lane.clearance ≈ MAX_RANGE - X_REF atol = 0.01   # nothing ahead
         # lane center to the left, lane pointing left
-        lane = estimate_lane!(LanePerception(ANGLES, X_FA), scan(straight_lane(offset=0.3)))
+        lane = estimate_lane!(LanePerception(ANGLES, X_REF), scan(straight_lane(offset=0.3)))
         @test lane.e ≈ 0.3 atol = 0.02
-        lane = estimate_lane!(LanePerception(ANGLES, X_FA), scan(straight_lane(offset=-0.3)))
+        lane = estimate_lane!(LanePerception(ANGLES, X_REF), scan(straight_lane(offset=-0.3)))
         @test lane.e ≈ -0.3 atol = 0.02
-        lane = estimate_lane!(LanePerception(ANGLES, X_FA), scan(straight_lane(h=0.15)))
+        lane = estimate_lane!(LanePerception(ANGLES, X_REF), scan(straight_lane(h=0.15)))
         @test lane.ψe ≈ 0.15 atol = 0.02
         @test abs(lane.e) < 0.03
+        # the same lane seen from a reference point 0.33 m farther back (the
+        # rear axle): the center line, which passes through the front axle
+        # heading left, is to the right of it
+        lane = estimate_lane!(LanePerception(ANGLES, X_REF - 0.33), scan(straight_lane(h=0.15)))
+        @test lane.e ≈ -0.33 * sin(0.15) atol = 0.02
+        @test lane.ψe ≈ 0.15 atol = 0.02
     end
 
     @testset "curves" begin
-        R = 5.0   # center line through the front axle, turning left around (X_FA, R)
-        left = [arc(X_FA, R, R - 1, -π / 2 - 0.5, π / 2), arc(X_FA, R, R + 1, -π / 2 - 0.5, π / 2)]
-        lane = estimate_lane!(LanePerception(ANGLES, X_FA), scan(left))
+        R = 5.0   # center line through the front axle, turning left around (X_REF, R)
+        left = [arc(X_REF, R, R - 1, -π / 2 - 0.5, π / 2), arc(X_REF, R, R + 1, -π / 2 - 0.5, π / 2)]
+        lane = estimate_lane!(LanePerception(ANGLES, X_REF), scan(left))
         @test lane.walls === :both
         @test lane.κ ≈ 1 / R rtol = 0.1
         @test abs(lane.e) < 0.03 && abs(lane.ψe) < 0.03
@@ -72,22 +77,22 @@ end
         @test 1 / R <= lane.κ_ahead <= 1.8 / R
         # the same turning right
         right = [[(x, -y) for (x, y) in w] for w in left]
-        lane = estimate_lane!(LanePerception(ANGLES, X_FA), scan(right))
+        lane = estimate_lane!(LanePerception(ANGLES, X_REF), scan(right))
         @test lane.κ ≈ -1 / R rtol = 0.1
         # the profile ahead sees a turn the axle hasn't reached
         bend = [vcat(line(0.0, 1.0, 0.0; from=-10.0, to=3.0)[1:1], arc(3.0, 3.0, 2.0, -π / 2, 0.0)),
                 vcat(line(0.0, -1.0, 0.0; from=-10.0, to=3.0)[1:1], arc(3.0, 3.0, 4.0, -π / 2, 0.0))]
-        lane = estimate_lane!(LanePerception(ANGLES, X_FA), scan(bend))
+        lane = estimate_lane!(LanePerception(ANGLES, X_REF), scan(bend))
         @test abs(lane.κ) < 0.1 && lane.κ_ahead > 0.25
     end
 
     @testset "clearance" begin
         walls = vcat(straight_lane(), [[(5.0, -2.0), (5.0, 2.0)]])
-        @test estimate_lane!(LanePerception(ANGLES, X_FA), scan(walls)).clearance ≈ 5.0 - X_FA atol = 0.01
+        @test estimate_lane!(LanePerception(ANGLES, X_REF), scan(walls)).clearance ≈ 5.0 - X_REF atol = 0.01
     end
 
     @testset "one wall" begin
-        p = LanePerception(ANGLES, X_FA)
+        p = LanePerception(ANGLES, X_REF)
         estimate_lane!(p, scan(straight_lane(offset=0.2)))      # learns the width
         lane = estimate_lane!(p, scan(straight_lane(offset=0.2)[2:2]))
         @test lane.walls === :right
@@ -148,12 +153,4 @@ end
         @test track!(f, estimate(0.0, 0.0; κ=1.0), 3.0, 0.0, 0.01).κ_ahead ≈ 1.0
     end
 
-    @testset "target_speed" begin
-        cfg = SpeedConfig(cruise=5.0, v_min=1.0, a_lat=4.0, a_brake=4.0, margin=0.5)
-        lane(κ, clearance) = LaneEstimate(0.0, 0.0, κ, κ, 2.0, :both, clearance, Float64[])
-        @test target_speed(cfg, lane(0.0, Inf)) == 5.0
-        @test target_speed(cfg, lane(1.0, Inf)) ≈ 2.0                  # √(a_lat / κ)
-        @test target_speed(cfg, lane(0.0, 0.5 + 1.5)) ≈ sqrt(1 + 2 * 4 * 1.5)
-        @test target_speed(cfg, lane(100.0, 0.0)) == 1.0
-    end
 end
