@@ -63,43 +63,14 @@ julia --project=examples examples/lane_keep.jl all --speed 7     # all 23 racetr
 julia --project=examples examples/lane_keep.jl path/to/map --pose X Y THETA
 ```
 
-Each step, the scan is turned into the Stanley inputs:
-
-1. Convert the ranges to points in the car frame.
-2. Split the points into a left wall and a right wall. Each starts at the
-   nearest return beside the car and is followed beam by beam until a gap,
-   so a wall that curves across the front of the car stays one wall.
-3. Pair each point with the nearest point on the other wall. The midpoints,
-   in order along the wall, trace the lane center.
-4. Smooth the midpoints into a local `Path` and call `tracking_error` at the
-   front axle to get `e`, `ψe` and the curvature.
-5. Combine this with the earlier scans in an unscented Kalman filter (Wan and
-   van der Merwe, 2000, from [KalmanFilters.jl](https://github.com/JuliaGNSS/KalmanFilters.jl)).
-   Between scans it predicts how `e`, `ψe` and the curvature change from the
-   car's speed and yaw rate, then moves part of the way toward the new scan.
-
-Without step 5, the heading error from a single scan is off by about 4°. The
-Stanley law passes that straight to the wheels, and since the sideways jolt
-grows with the square of speed, the car twitches at higher speeds. Turns show
-up in the yaw rate first, so the filter predicts them instead of lagging behind.
-A scan far from the prediction is ignored, unless that keeps happening (for
-example, a wall came into view). Then the filter restarts from the scan.
-
-Speed is the cruise speed, capped by `curvature_speed` using the largest
-curvature in the next 4 m, and by the free distance straight ahead. That
-curvature profile is also averaged over scans, which stops noise from
-slowing the car on straights.
-
-The script handles three edge cases:
-
-- **One wall visible:** it follows that wall at half the lane width. The
-  width is a median over the last 10 s, so a short wide stretch doesn't
-  change it.
-- **Deep in a hairpin:** only the outer wall is visible, wrapping around the
-  car, while the inner wall is in the scan's rear blind spot. The script
-  follows that wall and keeps the lane direction from the previous step.
-- **Racetrack scoring:** the track's centerline file is used only to place
-  the car on the start line and to score the run.
+Each step, [LidarLaneEstimation.jl](../LidarLaneEstimation.jl) (a sibling
+package) finds the lane in the scan and smooths it over time with an
+unscented Kalman filter, giving `e`, `ψe` and the curvature at the front
+axle. The script passes them to `steering_angle`. Speed is the cruise speed,
+capped by `curvature_speed` using the largest curvature in the next 4 m, and
+by the free distance straight ahead. For the racetracks, the track's
+centerline file is used only to place the car on the start line and to
+score the run.
 
 On all 23 f1tenth_racetracks maps, every run finishes a lap at cruise speeds
 of 3, 5, 7, 10 and 15 m/s with no wall contact. The car's average distance
