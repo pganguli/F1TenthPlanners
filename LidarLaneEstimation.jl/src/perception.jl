@@ -113,6 +113,8 @@ drawing.
 mutable struct LanePerception
     cfg::PerceptionConfig
     angles::Vector{Float64}
+    cos_a::Vector{Float64}        # cos and sin of each beam's angle, computed once
+    sin_a::Vector{Float64}
     x_ref::Float64                # reference point, meters ahead of the LiDAR
     xs::Vector{Float64}           # scan points in the LiDAR frame
     ys::Vector{Float64}
@@ -125,14 +127,18 @@ mutable struct LanePerception
     width::Float64                # their median, NaN until both walls are seen
     merged::Bool                  # this scan's "two walls" turned out to be one
     ψe_prev::Float64              # last heading error, to keep a one-wall lane's direction
+    bx::Vector{Float64}           # scratch for pairing the walls
+    by::Vector{Float64}
+    d2::Vector{Float64}
 end
 
 function LanePerception(angles::AbstractVector{<:Real}, x_ref::Real; cfg::PerceptionConfig=PerceptionConfig())
     n = length(angles)
     n >= 2 || throw(ArgumentError("need at least 2 beams"))
     issorted(angles) || throw(ArgumentError("beam angles must be in increasing (counterclockwise) order"))
-    return LanePerception(cfg, collect(Float64, angles), x_ref, zeros(n), zeros(n), Int[], Int[],
-        Float64[], Float64[], Float64[], 1, NaN, false, 0.0)
+    a = collect(Float64, angles)
+    return LanePerception(cfg, a, cos.(a), sin.(a), x_ref, zeros(n), zeros(n), Int[], Int[],
+        Float64[], Float64[], Float64[], 1, NaN, false, 0.0, Float64[], Float64[], Float64[])
 end
 
 LanePerception(num_beams::Integer, fov::Real, x_ref::Real; cfg::PerceptionConfig=PerceptionConfig()) =
@@ -222,19 +228,25 @@ _polyline_length(xs, ys) = sum((hypot(xs[k+1] - xs[k], ys[k+1] - ys[k]) for k in
 function _center_from(p::LanePerception, a, b)
     s = p.cfg.stride
     mx, my, mw = Float64[], Float64[], Float64[]
-    for k in 1:s:length(a)
-        i = a[k]
-        best_d2, best_j = Inf, 0
-        for m in 1:s:length(b)
-            j = b[m]
-            d2 = (p.xs[i] - p.xs[j])^2 + (p.ys[i] - p.ys[j])^2
-            if d2 < best_d2
-                best_d2, best_j = d2, j
-            end
+    # the other wall's points, side by side in memory so the distances to all
+    # of them can be computed several at a time (SIMD)
+    bj = b[1:s:end]
+    n = length(bj)
+    bx, by, d2 = resize!(p.bx, n), resize!(p.by, n), resize!(p.d2, n)
+    @inbounds for m in 1:n
+        bx[m], by[m] = p.xs[bj[m]], p.ys[bj[m]]
+    end
+    @inbounds for k in 1:s:length(a)
+        n == 0 && break
+        x, y = p.xs[a[k]], p.ys[a[k]]
+        best_d2 = Inf
+        @simd for m in 1:n
+            d2[m] = (x - bx[m])^2 + (y - by[m])^2
+            best_d2 = min(best_d2, d2[m])   # vectorizes (a branchy argmin wouldn't)
         end
-        best_j == 0 && continue
-        push!(mx, (p.xs[i] + p.xs[best_j]) / 2)
-        push!(my, (p.ys[i] + p.ys[best_j]) / 2)
+        best_m = findfirst(==(best_d2), d2)   # the first nearest point
+        push!(mx, (x + bx[best_m]) / 2)
+        push!(my, (y + by[best_m]) / 2)
         push!(mw, sqrt(best_d2))
     end
     cx, cy = _smooth(mx, my, p.cfg.smooth, p.cfg.spacing)
@@ -273,7 +285,8 @@ function _record_width!(p::LanePerception, w)
         p.widths[p.width_next] = w
         p.width_next = mod1(p.width_next + 1, p.cfg.width_memory)
     end
-    p.width = sort(p.widths)[cld(length(p.widths), 2)]
+    k = cld(length(p.widths), 2)
+    p.width = partialsort!(copyto!(resize!(p.d2, length(p.widths)), p.widths), k)   # the median
     return p
 end
 
@@ -286,12 +299,15 @@ function estimate_lane!(p::LanePerception, ranges::AbstractVector{<:Real})
     length(ranges) == length(p.angles) ||
         throw(DimensionMismatch("got $(length(ranges)) ranges for $(length(p.angles)) beams"))
     cfg = p.cfg
+    xs, ys, cos_a, sin_a = p.xs, p.ys, p.cos_a, p.sin_a
+    @inbounds @simd for i in eachindex(ranges, xs)
+        xs[i] = ranges[i] * cos_a[i]
+        ys[i] = ranges[i] * sin_a[i]
+    end
     clearance = Inf
-    for i in eachindex(ranges)
-        x, y = ranges[i] * cos(p.angles[i]), ranges[i] * sin(p.angles[i])
-        p.xs[i], p.ys[i] = x, y
-        if x > 0 && abs(y) <= cfg.car_halfwidth
-            clearance = min(clearance, x - p.x_ref)
+    @inbounds for i in eachindex(xs)
+        if xs[i] > 0 && abs(ys[i]) <= cfg.car_halfwidth
+            clearance = min(clearance, xs[i] - p.x_ref)
         end
     end
     _walls!(p, ranges)
