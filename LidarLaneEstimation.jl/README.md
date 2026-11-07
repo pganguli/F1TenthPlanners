@@ -7,7 +7,8 @@ uses a map or the vehicle's pose.
 
 Each estimate gives:
 
-- the lane's center line ahead, as points in the vehicle frame;
+- the lane's center line ahead, as points in the vehicle frame, and
+  optionally the line through the lane that bends least;
 - the cross-track error `e`, heading error `ψe` and curvature `κ` at a
   reference point you choose: the front axle for the Stanley law, the rear
   axle for pure pursuit, or the center of gravity for most LQR and MPC models;
@@ -19,17 +20,28 @@ Each estimate gives:
 ```julia
 using LidarLaneEstimation
 
-# 1080 beams over 4.7 rad; the reference point 0.16 m ahead of the LiDAR
-perceive = LanePerception(1080, 4.7, 0.16)
-# the same reference point is 0.33 m ahead of the rear axle
-smooth = LaneFilter(0.33)
+# 1081 beams over 270° (a Hokuyo UST-10LX); the reference point (here the
+# front axle) 0.13 m ahead of the LiDAR
+perceive = LanePerception(1081, 3π / 2, 0.13)
+# the same reference point is 0.257 m ahead of the rear axle
+smooth = LaneFilter(0.257)
 
 # every scan (ranges in meters), with the vehicle's speed and yaw rate
 lane = track!(smooth, estimate_lane!(perceive, ranges), v, yaw_rate, dt)
 lane.e, lane.ψe, lane.κ          # where the vehicle is in the lane
 lane.κ_ahead, lane.clearance     # for the speed
-perceive.cx, perceive.cy         # the center line, in the LiDAR frame
+perceive.cx, perceive.cy         # the line followed, in the LiDAR frame
 ```
+
+To follow the line through the lane that bends least instead of the center:
+
+```julia
+cfg = PerceptionConfig(line=:min_curvature, wall_margin=0.3)
+perceive = LanePerception(1081, 3π / 2, 0.13; cfg)
+```
+
+`e`, `ψe` and the curvatures are then measured against that line, and
+`perceive.center_x`, `perceive.center_y` still hold the lane center.
 
 Signs: x is forward and y to the left, and angles are counterclockwise.
 `e > 0` when the lane center is to the left, `ψe > 0` when the lane points
@@ -56,6 +68,23 @@ It also handles two edge cases:
 - **Deep in a hairpin:** only the outer wall is visible, wrapping around the
   vehicle, while the inner wall is in the scan's rear blind spot. It follows
   that wall and keeps the lane direction from the previous scan.
+
+**Minimum-curvature line** (`line=:min_curvature`): a vehicle that can't
+turn as sharply as a lane center, or that must slow down for it, does better
+on a line that uses the lane's width: in wide before a corner, close to the
+inside at its apex, wide again after. Each scan, the lane center is
+resampled every 0.2 m, and the line is the center shifted along its normals
+by amounts that minimize its summed squared curvature, while staying at
+least `wall_margin` from every return in the scan. Where nothing in the scan
+limits it, it stays within half the lane width of the center. This is the
+minimum-curvature method of Heilmeier et al. (2019), with their
+linearization (the tangents held at the center line's), applied to the
+stretch of lane in view instead of a whole lap. The resulting
+box-constrained quadratic program is solved exactly with an active-set
+method, in well under a millisecond. The linearization keeps the line a
+little closer to the center than the exact minimum-curvature line, which
+suits a car with steering lag: solving the exact curvature to convergence
+brought the car within 0.1 m of the walls on the f1tenth_racetracks maps.
 
 One scan's heading error is off by a few degrees, which makes a vehicle
 twitch at speed. `track!` combines the scans with an unscented Kalman filter

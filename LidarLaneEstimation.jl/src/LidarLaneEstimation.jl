@@ -24,11 +24,12 @@ using KalmanFilters
 using LinearAlgebra
 using PrecompileTools
 
-export PerceptionConfig, LanePerception, LaneEstimate, estimate_lane!
+export PerceptionConfig, LanePerception, LaneEstimate, estimate_lane!, PROFILE_STEP
 export FilterConfig, LaneFilter, track!
 
 include("geometry.jl")
 include("perception.jl")
+include("raceline.jl")
 include("filter.jl")
 include("precompile.jl")
 

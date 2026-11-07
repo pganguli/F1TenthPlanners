@@ -64,7 +64,12 @@ end
 function _curvature_at(line::_Polyline, s, base)
     lo, hi = max(s - base / 2, 0.0), min(s + base / 2, line.s[end])
     hi - lo < base / 2 && return NaN
-    a, b, c = _point_at(line, lo), _point_at(line, (lo + hi) / 2), _point_at(line, hi)
+    return _menger(_point_at(line, lo), _point_at(line, (lo + hi) / 2), _point_at(line, hi))
+end
+
+# Signed curvature of the circle through the points a, b and c (Menger
+# curvature; positive turning left).
+function _menger(a, b, c)
     cross = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1])
     return 2cross / (hypot(b[1] - a[1], b[2] - a[2]) * hypot(c[1] - b[1], c[2] - b[2]) * hypot(c[1] - a[1], c[2] - a[2]))
 end

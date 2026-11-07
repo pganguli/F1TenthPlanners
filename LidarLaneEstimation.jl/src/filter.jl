@@ -132,7 +132,8 @@ function track!(f::LaneFilter, lane::LaneEstimate, v, yaw_rate, dt)
     end
     f.x, f.P, f.profile = x, P, profile
     ψe = _wrap(x[2])
-    return LaneEstimate(x[1], ψe, x[3], _sharpest(profile, x[3]), lane.width, lane.walls, lane.clearance, profile)
+    return LaneEstimate(x[1], ψe, x[3], _sharpest(profile, x[3]), lane.width, lane.walls, lane.clearance, profile,
+        lane.sight)
 end
 
 # A profile sampled every PROFILE_STEP meters, moved d meters toward the vehicle
