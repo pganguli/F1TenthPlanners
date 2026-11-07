@@ -136,6 +136,7 @@ mutable struct LanePerception
     walls::Symbol                 # which walls it came from (see LaneEstimate)
     clearance::Float64            # free distance straight ahead
     widths::Vector{Float64}       # recent lane width measurements (a ring buffer)
+    widths_sorted::Vector{Float64}   # the same, sorted (for the median)
     width_next::Int
     width::Float64                # their median, NaN until both walls are seen
     merged::Bool                  # this scan's "two walls" turned out to be one
@@ -151,7 +152,7 @@ function LanePerception(angles::AbstractVector{<:Real}, x_ref::Real; cfg::Percep
     issorted(angles) || throw(ArgumentError("beam angles must be in increasing (counterclockwise) order"))
     a = collect(Float64, angles)
     return LanePerception(cfg, a, cos.(a), sin.(a), x_ref, zeros(n), zeros(n), Int[], Int[],
-        Float64[], Float64[], :none, Inf, Float64[], 1, NaN, false, 0.0, Float64[], Float64[], Float64[])
+        Float64[], Float64[], :none, Inf, Float64[], Float64[], 1, NaN, false, 0.0, Float64[], Float64[], Float64[])
 end
 
 LanePerception(num_beams::Integer, fov::Real, x_ref::Real; cfg::PerceptionConfig=PerceptionConfig()) =
@@ -239,34 +240,51 @@ _polyline_length(xs, ys) = sum((hypot(xs[k+1] - xs[k], ys[k+1] - ys[k]) for k in
 # A line long enough to trust (see `min_length`).
 _usable(xs, ys, cfg::PerceptionConfig) = length(xs) >= 3 && _polyline_length(xs, ys) >= cfg.min_length
 
-# Lane center from wall `a` (in driving order) and the other wall `b`:
-# the midpoints, and the wall-to-wall distance at each.
-function _center_from(p::LanePerception, a, b)
+# Lane centers from both walls (each in driving order): pair every (stride-th)
+# point of the right wall with its nearest point of the left wall, and every
+# point of the left wall with its nearest point of the right wall. Each
+# pair's distance is computed once, for both directions: a pass over the
+# left wall's points for each right-wall point finds that point's nearest
+# (a min reduction, then the first index reaching it) and updates every
+# left-wall point's nearest so far (elementwise, so both vectorize). Returns
+# the center from the right wall, and from the left wall with its midpoints
+# and wall-to-wall distances.
+function _centers(p::LanePerception)
     s = p.cfg.stride
-    mx, my, mw = Float64[], Float64[], Float64[]
-    # the other wall's points, side by side in memory so the distances to all
-    # of them can be computed several at a time (SIMD)
-    bj = b[1:s:end]
-    n = length(bj)
+    ri, li = p.right[1:s:end], p.left[1:s:end]
+    n = length(li)
+    # the left wall's points, side by side in memory (SIMD)
     bx, by, d2 = resize!(p.bx, n), resize!(p.by, n), resize!(p.d2, n)
+    best_l, near_l = fill(Inf, n), zeros(Int, n)   # each left point's nearest right point so far
     @inbounds for m in 1:n
-        bx[m], by[m] = p.xs[bj[m]], p.ys[bj[m]]
+        bx[m], by[m] = p.xs[li[m]], p.ys[li[m]]
     end
-    @inbounds for k in 1:s:length(a)
-        n == 0 && break
-        x, y = p.xs[a[k]], p.ys[a[k]]
-        best_d2 = Inf
+    rmx, rmy = Float64[], Float64[]
+    @inbounds for (k, i) in enumerate(ri)
+        x, y = p.xs[i], p.ys[i]
+        best = Inf
         @simd for m in 1:n
-            d2[m] = (x - bx[m])^2 + (y - by[m])^2
-            best_d2 = min(best_d2, d2[m])   # vectorizes (a branchy argmin wouldn't)
+            d = (x - bx[m])^2 + (y - by[m])^2
+            d2[m] = d
+            best = min(best, d)
+            closer = d < best_l[m]
+            near_l[m] = ifelse(closer, k, near_l[m])
+            best_l[m] = ifelse(closer, d, best_l[m])
         end
-        best_m = findfirst(==(best_d2), d2)   # the first nearest point
-        push!(mx, (x + bx[best_m]) / 2)
-        push!(my, (y + by[best_m]) / 2)
-        push!(mw, sqrt(best_d2))
+        m = findfirst(==(best), d2)   # the first nearest point
+        push!(rmx, (x + bx[m]) / 2)
+        push!(rmy, (y + by[m]) / 2)
     end
-    cx, cy = _smooth(mx, my, p.cfg.smooth, p.cfg.spacing)
-    return cx, cy, mx, my, mw
+    lmx, lmy, mw = similar(bx), similar(by), similar(bx)
+    @inbounds for m in 1:n
+        i = ri[near_l[m]]
+        lmx[m] = (bx[m] + p.xs[i]) / 2
+        lmy[m] = (by[m] + p.ys[i]) / 2
+        mw[m] = sqrt(best_l[m])
+    end
+    rx, ry = _smooth(rmx, rmy, p.cfg.smooth, p.cfg.spacing)
+    lx, ly = _smooth(lmx, lmy, p.cfg.smooth, p.cfg.spacing)
+    return rx, ry, lx, ly, lmx, lmy, mw
 end
 
 # Lane center from one wall alone: the wall shifted by half the lane width
@@ -295,14 +313,16 @@ end
 # Keep the lane width as a median over many steps, so a short wide stretch
 # (the bulb of a hairpin, a pit entry) does not change it.
 function _record_width!(p::LanePerception, w)
+    sorted = p.widths_sorted
     if length(p.widths) < p.cfg.width_memory
         push!(p.widths, w)
-    else
+    else   # replace the oldest
+        deleteat!(sorted, searchsortedfirst(sorted, p.widths[p.width_next]))
         p.widths[p.width_next] = w
         p.width_next = mod1(p.width_next + 1, p.cfg.width_memory)
     end
-    k = cld(length(p.widths), 2)
-    p.width = partialsort!(copyto!(resize!(p.d2, length(p.widths)), p.widths), k)   # the median
+    insert!(sorted, searchsortedfirst(sorted, w), w)
+    p.width = sorted[cld(length(sorted), 2)]   # the median
     return p
 end
 
@@ -348,8 +368,7 @@ function detect_lane!(p::LanePerception, ranges::AbstractVector{<:Real})
     if length(p.left) >= 2cfg.stride && length(p.right) >= 2cfg.stride
         # Build the center along each wall and keep the longer one: around a
         # turn that is the outer wall, which maps onto the center smoothly.
-        rx, ry, _, _, _ = _center_from(p, p.right, p.left)
-        lx, ly, mx, my, mw = _center_from(p, p.left, p.right)
+        rx, ry, lx, ly, mx, my, mw = _centers(p)
         cx, cy = _polyline_length(rx, ry) >= _polyline_length(lx, ly) ? (rx, ry) : (lx, ly)
         walls = :both
         # lane width from the pairs beside the reference point
