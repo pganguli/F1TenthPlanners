@@ -22,8 +22,9 @@
 # f1tenth_racetracks maps the track's centerline file is used only to place
 # the car at the start line and to score the run.
 #
-# It needs the realistic-dynamics branch of F1Tenth.jl: the car's actuator
-# limits, its 40 Hz LiDAR and `obs.scan_times`.
+# It needs F1Tenth.jl's realistic car (its main branch, not
+# archive/python-compat): the actuator limits, the 40 Hz LiDAR and
+# `obs.scan_times`.
 #
 #     julia --project=examples examples/lane_keep.jl Spa             # one lap, prints a score
 #     julia --project=examples examples/lane_keep.jl Spa --render    # watch it (needs a display)

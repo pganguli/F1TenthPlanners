@@ -53,9 +53,9 @@ treats the walls as lane boundaries and follows the line through the lane
 that bends least, as fast as it can still slow down in time for what it
 sees. The controller gets
 only the LiDAR scan, speed and yaw rate. It never sees the car's pose or the
-map. It needs F1Tenth.jl's `realistic-dynamics` branch, whose car has the
-real actuator chain (steering limits, servo lag, VESC speed loop) and a
-40 Hz LiDAR.
+map. It needs F1Tenth.jl's main branch (not `archive/python-compat`), whose
+car has the real actuator chain (steering limits, servo lag, VESC speed loop)
+and a 40 Hz LiDAR.
 
 ```sh
 julia --project=examples -e 'using Pkg; Pkg.instantiate()'
