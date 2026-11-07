@@ -61,7 +61,7 @@ real actuator chain (steering limits, servo lag, VESC speed loop) and a
 julia --project=examples -e 'using Pkg; Pkg.instantiate()'
 julia --project=examples examples/lane_keep.jl Spa               # one lap, prints a score
 julia --project=examples examples/lane_keep.jl Spa --render      # watch it
-julia --project=examples examples/lane_keep.jl all               # all 23 racetracks
+julia -t auto --project=examples examples/lane_keep.jl all       # all 23 racetracks, in parallel
 julia --project=examples examples/lane_keep.jl Spa --speed 3     # cap the speed
 julia --project=examples examples/lane_keep.jl path/to/map --pose X Y THETA
 ```

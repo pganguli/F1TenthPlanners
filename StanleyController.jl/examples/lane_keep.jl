@@ -27,7 +27,7 @@
 #
 #     julia --project=examples examples/lane_keep.jl Spa             # one lap, prints a score
 #     julia --project=examples examples/lane_keep.jl Spa --render    # watch it (needs a display)
-#     julia --project=examples examples/lane_keep.jl all             # every racetrack
+#     julia -t auto --project=examples examples/lane_keep.jl all     # every racetrack, in parallel
 #
 # The first time, set up the examples environment with
 #     julia --project=examples -e 'using Pkg; Pkg.instantiate()'
@@ -123,14 +123,15 @@ end
 # The controller: what runs on the car, from a scan to a command
 
 """
-    LaneKeeper(params, beams, lidar_dist; stanley, perception, smoothing, margin, v_max)
+    LaneKeeper(params, beams, lidar_dist; stanley, perception, smoothing, margin, latency, v_max)
 
 The on-board controller of a car with parameters `params` and a LiDAR whose
 beams point at `beams` [rad], `lidar_dist` meters ahead of the center of
 gravity: lane perception, the path planner (keeping `margin` meters from
 every return), the Kalman filter, the Stanley law (which measures the errors
-at the front axle) and the speed planner. `path_x`, `path_y` hold the last
-path planned (LiDAR frame).
+at the front axle) and the speed planner. A scan is published `sweep`
+seconds after its first beam, and its command takes effect `latency` after
+that. `path_x`, `path_y` hold the last path planned (LiDAR frame).
 """
 mutable struct LaneKeeper
     perceive::LanePerception
@@ -138,6 +139,8 @@ mutable struct LaneKeeper
     smooth::LaneFilter
     stanley::Stanley
     speed::SpeedConfig
+    sweep::Float64
+    latency::Float64
     path_x::Vector{Float64}
     path_y::Vector{Float64}
 end
@@ -150,7 +153,7 @@ function LaneKeeper(params::VehicleParams, beams, lidar_dist; stanley=default_st
     perceive = LanePerception(beams, params.lf - lidar_dist; cfg=perception)
     sweep = (beams[end] - beams[1]) / 2π / params.scan_rate
     return LaneKeeper(perceive, margin, LaneFilter(params.lf + params.lr; cfg=smoothing), stanley,
-        SpeedConfig(params; sweep, latency, v_max), Float64[], Float64[])
+        SpeedConfig(params; sweep, latency, v_max), sweep, latency, Float64[], Float64[])
 end
 
 # From a scan's publication to its command taking effect [s]: computing it
@@ -303,7 +306,6 @@ function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", 
     keeper = LaneKeeper(params, env.sim.agents[1].lidar.scan_angles, env.lidar_dist;
         stanley=something(stanley, default_stanley(params)), perception=something(perception, default_perception(params)),
         smoothing, latency, v_max=something(speed, params.speed_cmd_max))
-    sweep = keeper.speed.delay - latency - 1 / params.scan_rate
     perceive = keeper.perceive
 
     render && add_render_callback!(env, e -> render_callback(e, env, keeper))
@@ -334,7 +336,7 @@ function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", 
             scan_dt = isfinite(last_scan) ? obs.scan_times[1] - last_scan : 1 / params.scan_rate
             last_scan = obs.scan_times[1]
             new_steer, new_speed, lane = control!(keeper, obs.scans[1], v, r, scan_dt)
-            push!(pending, (last_scan + sweep + latency, new_steer, new_speed))
+            push!(pending, (last_scan + keeper.sweep + keeper.latency, new_steer, new_speed))
             scans += 1
             lane.walls === :both || (single += 1)
             if truth !== nothing && length(perceive.center_x) >= 3
@@ -439,10 +441,15 @@ end
 function main(args=ARGS)
     o = parse_args(args)
     if o[:map] == "all"
-        print_header()
-        for name in sort!(collect(keys(F1Tenth.RACETRACKS)))
-            print_result(run_map(name; speed=o[:speed], laps=o[:laps]))
+        # with several Julia threads (julia -t auto), the tracks run in parallel
+        F1Tenth.THREAD_AGENTS[] = false
+        names = sort!(collect(keys(F1Tenth.RACETRACKS)))
+        results = Vector{RunResult}(undef, length(names))
+        Threads.@threads :dynamic for i in eachindex(names)
+            results[i] = run_map(names[i]; speed=o[:speed], laps=o[:laps])
         end
+        print_header()
+        foreach(print_result, results)
     else
         o[:render] && @eval Main using GLMakie
         r = Base.invokelatest(run_map, o[:map]; speed=o[:speed], laps=o[:laps], pose=o[:pose],
