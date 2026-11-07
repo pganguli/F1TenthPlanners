@@ -1,19 +1,24 @@
 # Lane keeping on F1Tenth maps with the Stanley controller, using only the LiDAR.
 #
-# The walls are the lane boundaries. Each scan, the sibling package
-# LidarLaneEstimation.jl finds the lane, plans the line through it that bends
-# least (in wide before a corner, close to the inside at its apex), and turns
-# the scan into the two numbers the Stanley law needs, measured at the front
-# axle:
+# The walls are the lane boundaries. Each scan, the on-board controller
+# (`LaneKeeper`) runs, using four sibling packages:
 #
-#   e   cross-track error: how far that line is to the left [m]
-#   ψe  heading error: the line's direction relative to the car [rad]
+#   perception  LidarLaneEstimation.jl finds the lane and the room around its
+#               center
+#   path        MinimumCurvaturePlanner.jl plans the path through that room
+#               that bends least (in wide before a corner, close to the inside
+#               at its apex)
+#   estimation  LidarLaneEstimation.jl measures the car against the path and
+#               smooths the result with a Kalman filter: the cross-track error
+#               e and heading error ψe at the front axle, the path's curvature
+#               ahead, and how far ahead it is seen
+#   steering    StanleyController.jl turns e and ψe into a steering angle
+#   speed       VelocityProfilePlanner.jl: as fast as the car can still slow
+#               down in time for what it sees, and for what it may not see yet
 #
-# plus the line's curvature ahead, how far ahead it is seen and the free
-# distance straight ahead, which set the speed: as fast as the car can still
-# slow down in time for what it sees, and for what it may not see yet. A
-# Kalman filter in the same package smooths them over time. The controller
-# (`LaneKeeper`) never sees the car's pose or the map. For the
+# The commands go to the car's own low-level controllers (in F1Tenth.jl: the
+# command limiter, the steering servo, the VESC speed loop). The controller
+# never sees the car's pose or the map. For the
 # f1tenth_racetracks maps the track's centerline file is used only to place
 # the car at the start line and to score the run.
 #
@@ -29,7 +34,9 @@
 
 using F1Tenth
 using LidarLaneEstimation
+using MinimumCurvaturePlanner
 using StanleyController
+using VelocityProfilePlanner
 using Printf
 
 const USAGE = """
@@ -80,53 +87,67 @@ SpeedConfig(params::VehicleParams; v_max=params.speed_cmd_max, kwargs...) = Spee
     delay=2 / params.scan_rate, kwargs...)
 
 """
-    target_speed(cfg::SpeedConfig, lane::LaneEstimate, v, yaw_rate) -> v_cmd
+    speed_command(cfg::SpeedConfig, lane::LaneEstimate, v, yaw_rate) -> v_cmd
 
-The fastest speed from which the car, braking at `a_brake` after `delay`,
-reaches every point of the line ahead no faster than that point's curve
-allows (lateral acceleration at most `a_lat`). Past the line's end
-(`lane.sight`), it assumes a curve as sharp as the car can turn. Also kept:
-lateral acceleration in the turn the car is making now (speed × yaw rate) at
-most `a_lat`, and stopping room for a wall straight ahead.
+The first point of the velocity profile (forward-backward, from
+VelocityProfilePlanner.jl) along the path ahead: the fastest speed from which
+the car, braking at `a_brake` after driving on for `delay`, reaches every
+point no faster than its curve allows (lateral acceleration at most `a_lat`),
+can stop `margin` short of a wall straight ahead, and can still take, just
+past the end of the path (`lane.sight`), a curve as sharp as it can turn.
+Also capped so that the lateral acceleration in the turn the car is making
+now (speed × yaw rate) is at most `a_lat`.
 """
-function target_speed(cfg::SpeedConfig, lane::LaneEstimate, v, yaw_rate)
+function speed_command(cfg::SpeedConfig, lane::LaneEstimate, v, yaw_rate)
     coast = cfg.delay * abs(v)   # driven before the car reacts
-    reach(v_end, d) = sqrt(v_end^2 + 2cfg.a_brake * max(d - coast, 0.0))
-    corner(κ) = curvature_speed(κ; v_max=Inf, a_lat=cfg.a_lat)
-    limit = reach(corner(1 / cfg.r_min), lane.sight)
+    from_braking(d) = max(d - coast, 0.0)
+    # points (distance from where braking can start, curvature, speed cap)
+    pts = Tuple{Float64,Float64,Float64}[]
     for (j, κ) in enumerate(lane.κ_profile)
         d = (j - 1) * PROFILE_STEP
         d > lane.sight && break
-        isnan(κ) || (limit = min(limit, reach(corner(κ), d)))
+        isnan(κ) || push!(pts, (from_braking(d), κ, Inf))
     end
-    limit = min(limit, cfg.a_lat / max(abs(yaw_rate), eps()), reach(cfg.v_min, lane.clearance - cfg.margin))
-    return clamp(limit, cfg.v_min, cfg.v_max)
+    push!(pts, (from_braking(lane.sight), 0.0, cornering_speed(1 / cfg.r_min; a_lat=cfg.a_lat)))
+    wall = lane.clearance - cfg.margin
+    isfinite(wall) && push!(pts, (from_braking(wall), 0.0, cfg.v_min))
+    sort!(pts; by=first)
+    profile = velocity_profile(getindex.(pts, 1), getindex.(pts, 2); a_lat=cfg.a_lat, a_brake=cfg.a_brake,
+        v_cap=getindex.(pts, 3))
+    return clamp(min(profile[1], cfg.a_lat / max(abs(yaw_rate), eps())), cfg.v_min, cfg.v_max)
 end
 
 # ---------------------------------------------------------------------------
 # The controller: what runs on the car, from a scan to a command
 
 """
-    LaneKeeper(params, beams, lidar_dist; stanley, perception, smoothing, v_max)
+    LaneKeeper(params, beams, lidar_dist; stanley, perception, smoothing, margin, v_max)
 
 The on-board controller of a car with parameters `params` and a LiDAR whose
 beams point at `beams` [rad], `lidar_dist` meters ahead of the center of
-gravity: lane perception, the Kalman filter, the Stanley law (which measures
-the errors at the front axle) and the speed limits.
+gravity: lane perception, the path planner (keeping `margin` meters from
+every return), the Kalman filter, the Stanley law (which measures the errors
+at the front axle) and the speed planner. `path_x`, `path_y` hold the last
+path planned (LiDAR frame).
 """
-struct LaneKeeper
+mutable struct LaneKeeper
     perceive::LanePerception
+    margin::Float64
     smooth::LaneFilter
     stanley::Stanley
     speed::SpeedConfig
+    path_x::Vector{Float64}
+    path_y::Vector{Float64}
 end
 
 function LaneKeeper(params::VehicleParams, beams, lidar_dist; stanley=default_stanley(params),
-                    perception=default_perception(params), smoothing=default_smoothing(), v_max=params.speed_cmd_max)
+                    perception=default_perception(params), smoothing=default_smoothing(),
+                    margin=default_margin(params), v_max=params.speed_cmd_max)
     # the front axle is lf ahead of the center of gravity, so lf - lidar_dist
     # ahead of the LiDAR, and lf + lr ahead of the rear axle
     perceive = LanePerception(beams, params.lf - lidar_dist; cfg=perception)
-    return LaneKeeper(perceive, LaneFilter(params.lf + params.lr; cfg=smoothing), stanley, SpeedConfig(params; v_max))
+    return LaneKeeper(perceive, margin, LaneFilter(params.lf + params.lr; cfg=smoothing), stanley,
+        SpeedConfig(params; v_max), Float64[], Float64[])
 end
 
 # The defaults below were tuned on 12 of the 23 racetracks (two LiDAR noise
@@ -138,12 +159,14 @@ end
 # every k from 2 to 5 finishes. The softening speed hardly matters.
 default_stanley(params) = Stanley(k=3.0, k_soft=1.0, k_yaw=0.1, max_steer=params.s_max)
 
-# Follow the minimum-curvature line, keeping half the car's width plus
-# 0.15 m from the walls (it seldom comes that close), using returns out to
-# 8 m (10 m, the LiDAR's rated range, adds sparse, noisy points that cost
-# wall clearance for no gain), with the curvature as far ahead as that.
-default_perception(params) = PerceptionConfig(car_halfwidth=params.width / 2, line=:min_curvature,
-    wall_margin=params.width / 2 + 0.15, r_max=8.0, preview=8.0)
+# Use returns out to 8 m (10 m, the LiDAR's rated range, adds sparse, noisy
+# points that cost wall clearance for no gain), with the curvature as far
+# ahead as that.
+default_perception(params) = PerceptionConfig(car_halfwidth=params.width / 2, r_max=8.0, preview=8.0)
+
+# The path keeps half the car's width plus 0.15 m from every return (it
+# seldom comes that close).
+default_margin(params) = params.width / 2 + 0.15
 
 # Scan noise as measured against the true lane center (standard deviations
 # of the scan's errors on the tuning tracks). Process noise: 5 × the measured
@@ -160,9 +183,14 @@ given the measured speed and yaw rate and the time `dt` since the last scan,
 with the lane estimate they came from.
 """
 function control!(k::LaneKeeper, ranges, v, yaw_rate, dt)
-    lane = track!(k.smooth, estimate_lane!(k.perceive, ranges), v, yaw_rate, dt)
+    p = k.perceive
+    detect_lane!(p, ranges)
+    c = lane_corridor(p, k.margin)
+    k.path_x, k.path_y = c === nothing ? (p.center_x, p.center_y) :
+        min_curvature_path(c.x, c.y, c.lower, c.upper; normals=(c.nx, c.ny))
+    lane = track!(k.smooth, measure!(p, k.path_x, k.path_y), v, yaw_rate, dt)
     steer = steering_angle(k.stanley, lane.e, lane.ψe, v; yaw_rate, path_yaw_rate=lane.κ * v)
-    return steer, target_speed(k.speed, lane, v, yaw_rate), lane
+    return steer, speed_command(k.speed, lane, v, yaw_rate), lane
 end
 
 # ---------------------------------------------------------------------------
@@ -253,7 +281,7 @@ function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", 
         smoothing, v_max=something(speed, params.speed_cmd_max))
     perceive = keeper.perceive
 
-    render && add_render_callback!(env, e -> render_callback(e, env, perceive))
+    render && add_render_callback!(env, e -> render_callback(e, env, keeper))
     obs, _, _, _ = reset!(env, [pose[1] pose[2] pose[3]])
     render && render!(env)
 
@@ -324,7 +352,7 @@ end
 
 const _drawn = Ref{Any}(nothing)
 
-function render_callback(e, env, perceive)
+function render_callback(e, env, keeper)
     GL = Main.GLMakie
     # camera follows the car, as in waypoint_follow.jl
     xs = [p[1] for p in e.cars[1][]]
@@ -340,7 +368,7 @@ function render_callback(e, env, perceive)
     ox, oy = front_axle(st[1], st[2], θ, env.lidar_dist)   # scan origin
     k = F1Tenth.RENDER_SCALE   # renderer units per meter
     pts = GL.Point2f[GL.Point2f(k * (ox + x * cos(θ) - y * sin(θ)), k * (oy + x * sin(θ) + y * cos(θ)))
-           for (x, y) in zip(perceive.cx, perceive.cy)]
+           for (x, y) in zip(keeper.path_x, keeper.path_y)]
     if _drawn[] === nothing
         _drawn[] = GL.Observable(pts)
         GL.lines!(e.axis, _drawn[]; color=:orange, linewidth=3)

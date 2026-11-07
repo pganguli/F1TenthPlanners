@@ -38,16 +38,6 @@ using Test
         @test_throws ArgumentError Stanley(max_steer=0.0)
     end
 
-    @testset "curvature_speed" begin
-        @test curvature_speed(0.0; v_max=5.0, a_lat=4.0) == 5.0
-        @test curvature_speed(1.0; v_max=5.0, a_lat=4.0) ≈ 2.0
-        @test curvature_speed(-1.0; v_max=5.0, a_lat=4.0) ≈ 2.0
-        @test curvature_speed(100.0; v_max=5.0, a_lat=4.0, v_min=1.0) == 1.0
-        @test curvature_speed(0.01; v_max=5.0, a_lat=4.0) == 5.0
-        @test_throws ArgumentError curvature_speed(1.0; v_max=5.0, a_lat=0.0)
-        @test_throws ArgumentError curvature_speed(1.0; v_max=1.0, a_lat=1.0, v_min=2.0)
-    end
-
     @testset "front_axle" begin
         @test all(front_axle(1.0, 2.0, 0.0, 0.5) .≈ (1.5, 2.0))
         @test all(isapprox.(front_axle(0.0, 0.0, π / 2, 2.0), (0.0, 2.0); atol=1e-12))

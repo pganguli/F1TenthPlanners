@@ -20,7 +20,7 @@ estimate them some other way (for example from a sensor) and pass them to
 """
 module StanleyController
 
-export Stanley, steering_angle, TrackingError, Path, tracking_error, front_axle, curvature_speed, wrap_angle
+export Stanley, steering_angle, TrackingError, Path, tracking_error, front_axle, wrap_angle
 
 """
     wrap_angle(a) -> Float64
@@ -103,20 +103,6 @@ when `(x, y)` is the vehicle's reference point and `d` the distance from it
 to the front axle.
 """
 front_axle(x::Real, y::Real, θ::Real, d::Real) = (x + d * cos(θ), y + d * sin(θ))
-
-"""
-    curvature_speed(κ; v_max, a_lat, v_min=0.0) -> v
-
-The fastest speed that keeps lateral acceleration `v² |κ|` at or below
-`a_lat` [m/s²] on a curve of curvature `κ` [1/m], clamped to
-`[v_min, v_max]`.
-"""
-function curvature_speed(κ::Real; v_max::Real, a_lat::Real, v_min::Real=0.0)
-    a_lat > 0 || throw(ArgumentError("a_lat must be positive, got $a_lat"))
-    v_min <= v_max || throw(ArgumentError("v_min ($v_min) must not exceed v_max ($v_max)"))
-    iszero(κ) && return Float64(v_max)
-    return clamp(sqrt(a_lat / abs(κ)), v_min, v_max)
-end
 
 """
     Path(x, y; closed=false)

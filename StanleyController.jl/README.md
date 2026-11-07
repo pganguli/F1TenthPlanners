@@ -32,8 +32,6 @@ path = Path(xs, ys; closed=true)
 err = tracking_error(path, front_axle(x, y, θ, lf)..., θ)   # e, ψe, κ, s, segment
 δ = steering_angle(c, err, v; yaw_rate=r)
 
-# speed for a curve: lateral acceleration ≤ a_lat
-v_cmd = curvature_speed(κ; v_max=5.0, a_lat=5.0, v_min=1.0)
 ```
 
 | Parameter | Meaning |
@@ -68,14 +66,21 @@ julia --project=examples examples/lane_keep.jl Spa --speed 3     # cap the speed
 julia --project=examples examples/lane_keep.jl path/to/map --pose X Y THETA
 ```
 
-On each new scan (every 25 ms), [LidarLaneEstimation.jl](../LidarLaneEstimation.jl)
-(a sibling package) finds the lane, plans the minimum-curvature line
-through it, and smooths the errors over time with an unscented Kalman
-filter, giving `e`, `ψe` and the curvature at the front axle. The script
-passes them to `steering_angle` and holds the command until the next scan.
+On each new scan (every 25 ms), the on-board controller (`LaneKeeper`)
+runs, using sibling packages: [LidarLaneEstimation.jl](../LidarLaneEstimation.jl)
+finds the lane and the room around its center;
+[MinimumCurvaturePlanner.jl](../MinimumCurvaturePlanner.jl) plans the path
+through it that bends least; LidarLaneEstimation.jl measures the car against
+that path and smooths the result with an unscented Kalman filter, giving
+`e`, `ψe` and the curvature at the front axle; `steering_angle` turns them
+into a steering command; and
+[VelocityProfilePlanner.jl](../VelocityProfilePlanner.jl) sets the speed.
+The commands are held until the next scan and go to the car's own low-level
+controllers (in F1Tenth.jl).
+
 There is no cruise speed. The speed is the fastest from which the car,
 braking at the command limiter's 2.5 m/s² after a two-scan delay, reaches
-every point of the line it sees no faster than that point's curve allows
+every point of the path it sees no faster than that point's curve allows
 (lateral acceleration `a_lat`), and also a curve as sharp as the car can
 turn just past the end of what it sees. It is also capped so that speed ×
 yaw rate stays within `a_lat`, and by the free distance straight ahead. For
@@ -83,7 +88,7 @@ the racetracks, the track's centerline file is used only to place the car on
 the start line and to score the run.
 
 Every run on the 23 f1tenth_racetracks maps finishes a lap, at average
-speeds of 4.1–5.3 m/s, with the car's body at least 0.26 m from the walls.
+speeds of 4.1–5.4 m/s, with the car's body at least 0.23 m from the walls.
 The speed is limited mostly by how far ahead the LiDAR sees the lane and the
 2.5 m/s² braking, more than by grip.
 
@@ -93,7 +98,7 @@ can't (the filter's scan noise, from the scan's errors against the true lane
 center), and the rest (Stanley's gains, the filter's process noise, the
 LiDAR range used) were tuned on 12 racetracks with two LiDAR noise seeds
 each, then checked on the other 11: every lap there finished too, with the
-same mean wall clearance (0.52 m against 0.51 m). Each tuned value sits in
+same mean wall clearance (0.51 m against 0.49 m). Each tuned value sits in
 the middle of a range of values that all finish every lap; see the comments
 at `default_stanley`, `default_perception` and `default_smoothing` in the
 example.
