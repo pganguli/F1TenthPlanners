@@ -1,0 +1,17 @@
+[deps]
+F1Tenth = "ec9dc3f2-e932-4b18-a493-a4686694dcbe"
+GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
+LidarLaneEstimation = "df66ebbf-4f73-4268-99b2-bc89cfec981b"
+LidarRacer = "e7940826-cef1-434a-86be-118e8a8d05da"
+MinimumCurvaturePlanner = "267b4fd1-97d5-44e8-be58-380e88c1ca66"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+StanleyController = "6c722594-8a4a-4272-af8d-909386d35611"
+VelocityProfilePlanner = "e0ccf83b-6183-451d-b977-c2d11878aa67"
+
+[sources]
+F1Tenth = {path = "../../F1Tenth.jl"}
+LidarLaneEstimation = {path = "../../LidarLaneEstimation.jl"}
+LidarRacer = {path = ".."}
+MinimumCurvaturePlanner = {path = "../../MinimumCurvaturePlanner.jl"}
+StanleyController = {path = "../../StanleyController.jl"}
+VelocityProfilePlanner = {path = "../../VelocityProfilePlanner.jl"}
