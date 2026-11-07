@@ -67,20 +67,25 @@ passing it on: it is ForzaETH's measured latency for their whole race stack
 on NUC5's computer, a cautious value for this lighter controller. The
 command is held until the next one and goes to the car's own low-level
 controllers (in F1Tenth.jl). The simulator steps every 2.5 ms, so that
-latency is timed closely. The controller tolerates up to 50 ms of latency
-(laps 2.3% slower); at 100 ms it starts to hit walls.
+latency is timed closely. The controller tolerates up to 75 ms of latency
+(laps 2.8% slower at 50 ms, 7.5% at 75 ms); at 100 ms it starts to hit
+walls.
 
 There is no cruise speed. The speed is the fastest from which the car,
 braking at the command limiter's 2.5 m/s² after a two-scan delay, reaches
 every point of the line it sees no faster than that point's curve allows
 (lateral acceleration `a_lat`), and also a curve as sharp as the car can
 turn just past the end of what it sees. It is also capped so that speed ×
-yaw rate stays within `a_lat`, and by the free distance straight ahead. For
-the racetracks, the track's centerline file is used only to place the car on
-the start line and to score the run.
+yaw rate stays within `a_lat`, and so that it can slow down short of a wall
+ahead. That wall is looked for along the arc the car is turning on and along
+the line it follows, whichever is clear for longer, not straight ahead: in a
+turn, the wall straight ahead is the outer wall the car is turning away
+from, and braking for it cost 5.5% of lap time. For the racetracks, the
+track's centerline file is used only to place the car on the start line and
+to score the run.
 
 Every run on the 23 f1tenth_racetracks maps finishes a lap, at average
-speeds of 4.8–5.9 m/s, with the car's body at least 0.23 m from the walls.
+speeds of 5.1–6.3 m/s, with the car's body at least 0.23 m from the walls.
 The speed is limited mostly by how far ahead the LiDAR sees the lane and the
 2.5 m/s² braking, more than by grip.
 

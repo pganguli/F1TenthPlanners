@@ -28,7 +28,7 @@ using MinimumCurvaturePlanner
 using StanleyController
 using VelocityProfilePlanner
 
-export CarParams, SpeedConfig, speed_command, Racer, control!
+export CarParams, SpeedConfig, speed_command, free_distance, Racer, control!
 
 # ---------------------------------------------------------------------------
 # The car
@@ -89,7 +89,7 @@ Base.@kwdef struct SpeedConfig
     # Time from a scan's first beam until the car acts on it, and the speed
     # command changes [s]. The car drives on meanwhile.
     delay::Float64
-    margin::Float64 = 0.5     # distance to keep from a wall straight ahead [m]
+    margin::Float64 = 0.5     # distance to keep from a wall ahead [m]
 end
 
 # From the car: its top speed command, the command limiter's deceleration,
@@ -102,18 +102,19 @@ SpeedConfig(car::CarParams; sweep, latency, v_max=car.speed_cmd_max, kwargs...) 
     delay=sweep + latency + 1 / car.scan_rate, kwargs...)
 
 """
-    speed_command(cfg::SpeedConfig, lane::LaneEstimate, v, yaw_rate) -> v_cmd
+    speed_command(cfg::SpeedConfig, lane::LaneEstimate, clearance, v, yaw_rate) -> v_cmd
 
 The first point of the velocity profile (forward-backward, from
 VelocityProfilePlanner.jl) along the path ahead: the fastest speed from which
 the car, braking at `a_brake` after driving on for `delay`, reaches every
 point no faster than its curve allows (lateral acceleration at most `a_lat`),
-can stop `margin` short of a wall straight ahead, and can still take, just
-past the end of the path (`lane.sight`), a curve as sharp as it can turn.
-Also capped so that the lateral acceleration in the turn the car is making
-now (speed × yaw rate) is at most `a_lat`.
+can slow to `v_min` `margin` short of a wall `clearance` meters ahead (see
+[`free_distance`](@ref)), and can still take, just past the end of the path
+(`lane.sight`), a curve as sharp as it can turn. Also capped so that the
+lateral acceleration in the turn the car is making now (speed × yaw rate) is
+at most `a_lat`.
 """
-function speed_command(cfg::SpeedConfig, lane::LaneEstimate, v, yaw_rate)
+function speed_command(cfg::SpeedConfig, lane::LaneEstimate, clearance, v, yaw_rate)
     coast = cfg.delay * abs(v)   # driven before the car reacts
     from_braking(d) = max(d - coast, 0.0)
     # points (distance from where braking can start, curvature, speed cap)
@@ -124,7 +125,7 @@ function speed_command(cfg::SpeedConfig, lane::LaneEstimate, v, yaw_rate)
         isnan(κ) || push!(pts, (from_braking(d), κ, Inf))
     end
     push!(pts, (from_braking(lane.sight), 0.0, cornering_speed(1 / cfg.r_min; a_lat=cfg.a_lat)))
-    wall = lane.clearance - cfg.margin
+    wall = clearance - cfg.margin
     isfinite(wall) && push!(pts, (from_braking(wall), 0.0, cfg.v_min))
     sort!(pts; by=first)
     profile = velocity_profile(getindex.(pts, 1), getindex.(pts, 2); a_lat=cfg.a_lat, a_brake=cfg.a_brake,
@@ -216,6 +217,21 @@ default_margin(car) = car.width / 2 + 0.15
 default_smoothing() = FilterConfig(σ_e=0.05, σ_ψ=0.075, σ_κ=0.06, q_e=0.5, q_ψ=0.85, q_κ=0.8)
 
 """
+    free_distance(r::Racer, lane::LaneEstimate, v, yaw_rate) -> d
+
+The free distance ahead [m] in the last scan, for the speed: along the arc
+the car is turning on now (its yaw rate over its speed) or along the line it
+follows (its curvature at the front axle, `lane.κ`), whichever is clear for
+longer. The car keeps a way out while either one is: it can hold its turn,
+or follow the line. Straight ahead would be too cautious in a turn, where
+the wall straight ahead is the outer wall the car is turning away from.
+"""
+function free_distance(r::Racer, lane::LaneEstimate, v, yaw_rate)
+    turning = abs(v) > 0.5 ? yaw_rate / abs(v) : 0.0
+    return max(clearance(r.perceive, turning), clearance(r.perceive, lane.κ))
+end
+
+"""
     control!(r::Racer, ranges, v, yaw_rate, dt) -> (steer, speed, lane)
 
 The steering angle [rad] and speed [m/s] to command for a new scan `ranges`,
@@ -230,7 +246,7 @@ function control!(r::Racer, ranges, v, yaw_rate, dt)
         min_curvature_path(c.x, c.y, c.lower, c.upper; normals=(c.nx, c.ny))
     lane = track!(r.smooth, measure!(p, r.path_x, r.path_y), v, yaw_rate, dt)
     steer = steering_angle(r.stanley, lane.e, lane.ψe, v; yaw_rate, path_yaw_rate=lane.κ * v)
-    return steer, speed_command(r.speed, lane, v, yaw_rate), lane
+    return steer, speed_command(r.speed, lane, free_distance(r, lane, v, yaw_rate), v, yaw_rate), lane
 end
 
 end # module

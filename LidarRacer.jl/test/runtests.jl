@@ -90,17 +90,23 @@ end
 
     @testset "slower in a turn, and for a wall ahead" begin
         _, v_straight, _ = settle(Racer(CAR, BEAMS, LIDAR_DIST), scan(straight()))
-        steer, v_turn, lane = settle(Racer(CAR, BEAMS, LIDAR_DIST), scan(left_turn(3.0)))
+        r = Racer(CAR, BEAMS, LIDAR_DIST)
+        steer, v_turn, lane = settle(r, scan(left_turn(3.0)))
         @test steer > 0
         @test lane.κ > 0
         @test v_turn < v_straight
+        # turning with the lane, the outer wall straight ahead (about 2.5 m
+        # away) is not in the way
+        @test free_distance(r, lane, 3.0, 1.0) > 5.0
+        # not turning yet, the line still curves away from it
+        @test free_distance(r, lane, 3.0, 0.0) > LidarRacer.clearance(r.perceive) + 0.3
 
         walls = [straight(; length=2.0); [[(2.0, -1.0), (2.0, 1.0)]]]   # a dead end 2 m ahead
         r = Racer(CAR, BEAMS, LIDAR_DIST)
         _, v_wall, lane = settle(r, scan(walls))
         # no faster than it can brake from, after the delay, to v_min `margin` short of the wall
         cfg = r.speed
-        d = lane.clearance - cfg.margin - cfg.delay * 3.0
+        d = free_distance(r, lane, 3.0, 0.0) - cfg.margin - cfg.delay * 3.0
         @test v_wall <= sqrt(cfg.v_min^2 + 2cfg.a_brake * d) + 1e-9
         @test v_wall < v_turn
     end
