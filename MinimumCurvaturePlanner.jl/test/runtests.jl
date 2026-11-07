@@ -1,6 +1,10 @@
 using MinimumCurvaturePlanner
-using MinimumCurvaturePlanner: _box_qp
-using Test
+using MinimumCurvaturePlanner: _box_qp, _normal_equations, _entry, _Penta
+using LinearAlgebra, Random, Test
+
+include("dense_reference.jl")
+using .DenseReference: dense_offsets, dense_box_qp, dense_qp
+include("random_problems.jl")
 
 # Curvature of the circle through three points (positive turning left).
 function menger(a, b, c)
@@ -84,6 +88,82 @@ end
         # linearization's bias), and the refinement undoes it
         p0 = min_curvature_path(x, y, lower, upper; closed=true)
         @test sumsq(px, py; closed=true) < sumsq(p0...; closed=true)
+    end
+
+    @testset "banded solver against the dense one" begin
+        rng = Xoshiro(20261107)
+        qpcost(H, g, α) = dot(α, H * α) / 2 + dot(g, α)
+        # The quadratic program alone. Short open lines are ill-conditioned
+        # (κ(H) ≈ 1.6e7: only the tiebreak pins their shift and tilt), which
+        # limits either solver to about 1e-9 of the exact answer; closed ones
+        # agree to about 1e-14.
+        for closed in (false, true), n in [3:12; 15; 20; 31; 50; 100; 200; 300], _ in 1:3
+            x, y, lower, upper, normals = random_problem(rng, n, closed)
+            α = min_curvature_offsets(x, y, lower, upper; closed, normals)
+            ref = dense_offsets(x, y, lower, upper; closed, normals)
+            H, g = dense_qp(x, y; closed, normals)
+            @test isapprox(α, ref; rtol=closed ? 1e-10 : 1e-9, atol=1e-14)
+            @test isapprox(qpcost(H, g, α), qpcost(H, g, ref); rtol=1e-12, atol=1e-14)
+            @test all(lower .<= α .<= upper)
+        end
+        # The solver on matrices like the refinement's (CᵀC with C = J, three
+        # nonzeros per row), with many variables held, so that few are free.
+        # A larger tiebreak keeps them well conditioned, to compare tightly.
+        for closed in (false, true), n in [3:12; 20; 57], held in (0.1, 0.5, 0.9), _ in 1:3
+            ks = closed ? (1:n) : (2:n-1)
+            C, v = randn(rng, length(ks), 3), randn(rng, length(ks))
+            H, g = _normal_equations(ks, C, v, n, closed, 1e-2)
+            Hd = H isa _Penta ? [_entry(H, i, j) for i in 1:n, j in 1:n] : H
+            A = zeros(length(ks), n)
+            for (row, k) in enumerate(ks), p in 1:3
+                A[row, mod1(k + p - 2, n)] += C[row, p]
+            end
+            @test Hd ≈ A' * A + 1e-2 * I rtol = 1e-14
+            @test g ≈ A' * v rtol = 1e-14
+            lb, ub = -rand(rng, n), rand(rng, n)
+            for i in 1:n
+                rand(rng) < held && (lb[i] = ub[i] = 0.0)
+            end
+            @test _box_qp(H, g, lb, ub) ≈ dense_box_qp(Hd, g, lb, ub) rtol = 1e-10
+        end
+        # Refined: the exact curvature's Jacobian comes from finite
+        # differences (step 1e-7 m), which turn rounding-level differences into
+        # ~1e-9 of the Jacobian, and Gauss-Newton grows them from step to step:
+        # moving the dense version's own input by one ulp moves its result by up
+        # to ~1e-5 on these wobbly loops. So only agreement well within the
+        # refinement's own stopping tolerance (steps under 1e-4 m) is asked.
+        for closed in (false, true), n in [3:8; 20; 100; 300], _ in 1:2
+            x, y, lower, upper, normals = random_problem(rng, n, closed)
+            α = min_curvature_offsets(x, y, lower, upper; closed, normals, iterations=20)
+            ref = dense_offsets(x, y, lower, upper; closed, normals, iterations=20)
+            @test isapprox(α, ref; rtol=1e-3)
+            @test all(lower .- 1e-12 .<= α .<= upper .+ 1e-12)   # α + t·step may round past a bound
+        end
+        # the stadium lap, refined, as the tests above use it
+        x, y = stadium(10.0, 2.0, 0.2)
+        n = length(x)
+        α = min_curvature_offsets(x, y, fill(-0.8, n), fill(0.8, n); closed=true, iterations=20)
+        @test α ≈ dense_offsets(x, y, fill(-0.8, n), fill(0.8, n); closed=true, iterations=20) rtol = 1e-6
+    end
+
+    @testset "edge cases" begin
+        for (closed, n) in ((false, 3), (true, 3), (true, 4), (true, 5), (false, 9), (true, 9)), it in (0, 20)
+            x, y = closed ? (cos.(2π .* (0:n-1) ./ n), sin.(2π .* (0:n-1) ./ n)) : (collect(0.0:n-1), 0.1 .* (0:n-1) .^ 2)
+            # every point held: nothing moves
+            @test min_curvature_offsets(x, y, zeros(n), zeros(n); closed, iterations=it) == zeros(n)
+            # a corridor wide enough that no bound is reached (refined, a
+            # 3-point loop then shrinks to a point, where curvature is undefined)
+            wide = fill(1e3, n)
+            closed && n == 3 && it > 0 || @test min_curvature_offsets(x, y, -wide, wide; closed, iterations=it) ≈
+                  dense_offsets(x, y, -wide, wide; closed, iterations=it) rtol = it == 0 ? 1e-9 : 1e-6
+            # all but one held, then all but two
+            for free in (1:1, 1:2)
+                lo, up = zeros(n), zeros(n)
+                lo[free] .= -1; up[free] .= 1
+                @test min_curvature_offsets(x, y, lo, up; closed, iterations=it) ≈
+                      dense_offsets(x, y, lo, up; closed, iterations=it) rtol = 1e-9 atol = 1e-14
+            end
+        end
     end
 
     @testset "argument checks" begin

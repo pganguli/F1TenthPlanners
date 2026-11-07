@@ -47,6 +47,21 @@ Algorithm 16.3). A small `tiebreak` weight on `Σ α²` picks the path nearest
 the reference among those that bend equally little (on a straight, every
 parallel path does).
 
+Each `κ_i` involves only a point and its two neighbors, so the program's
+matrix is zero beyond two places from its diagonal (pentadiagonal), and
+holding some points at their bounds keeps the rest pentadiagonal. Each step
+of the active-set method is then a banded Cholesky solve, in time linear in
+the number of points. A closed line's ends are neighbors too, which adds
+entries in the matrix's corners; those couple only the first two free points
+to the last two, so the last two are eliminated through their 2×2 Schur
+complement, and the rest is again a banded solve (three right-hand sides
+instead of one). That keeps the package free of dependencies beyond
+LinearAlgebra, where a sparse Cholesky (CHOLMOD, from SparseArrays) would add
+one and a fixed cost per solve. The method adds one bound per step, so the
+number of steps grows with the number of bounds the path ends up at: a lap
+of 5000 points pressed against 400 bounds takes about 0.2 s, one of 165
+points about 0.2 ms, and a 50-point lane about 11 µs.
+
 Holding the tangents fixed favors the inside of a corner: shifting a corner's
 points outward spreads them apart, which the linearization counts as more
 bending. On a narrow corridor that only keeps the path a little closer to the
