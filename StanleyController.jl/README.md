@@ -88,20 +88,22 @@ the racetracks, the track's centerline file is used only to place the car on
 the start line and to score the run.
 
 Every run on the 23 f1tenth_racetracks maps finishes a lap, at average
-speeds of 4.1–5.4 m/s, with the car's body at least 0.23 m from the walls.
+speeds of 4.8–5.9 m/s, with the car's body at least 0.23 m from the walls.
 The speed is limited mostly by how far ahead the LiDAR sees the lane and the
 2.5 m/s² braking, more than by grip.
 
 The settings come from the car or the sensor where they can (wheelbase,
-width, steering and braking limits, scan rate), are measured where they
-can't (the filter's scan noise, from the scan's errors against the true lane
-center), and the rest (Stanley's gains, the filter's process noise, the
-LiDAR range used) were tuned on 12 racetracks with two LiDAR noise seeds
-each, then checked on the other 11: every lap there finished too, with the
-same mean wall clearance (0.51 m against 0.49 m). Each tuned value sits in
-the middle of a range of values that all finish every lap; see the comments
-at `default_stanley`, `default_perception` and `default_smoothing` in the
-example.
+width, steering and braking limits, scan rate, the LiDAR's 10 m detection
+range), are measured where they can't (the filter's scan noise, from the
+scan's errors against the true lane center), and the rest (Stanley's gains,
+the filter's process noise, the gap that ends a wall) were tuned on 12
+racetracks with two LiDAR noise seeds each, then checked on the other 11:
+every lap there finished too, with the same mean wall clearance (0.50 m
+against 0.48 m). Each tuned value sits in the middle of a range of values
+that all finish every lap. The remaining perception and filter settings
+changed nothing measurable on these tracks and keep their defaults. See the
+comments at `default_stanley`, `default_perception` and `default_smoothing`
+in the example.
 
 ## Tests
 

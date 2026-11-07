@@ -159,10 +159,17 @@ end
 # every k from 2 to 5 finishes. The softening speed hardly matters.
 default_stanley(params) = Stanley(k=3.0, k_soft=1.0, k_yaw=0.1, max_steer=params.s_max)
 
-# Use returns out to 8 m (10 m, the LiDAR's rated range, adds sparse, noisy
-# points that cost wall clearance for no gain), with the curvature as far
-# ahead as that.
-default_perception(params) = PerceptionConfig(car_halfwidth=params.width / 2, r_max=8.0, preview=8.0)
+# Use every return the LiDAR guarantees (its detection range, 10 m on white
+# walls), with the curvature as far ahead as that. Far along a wall seen at a
+# grazing angle, neighboring returns are about r² Δθ / w apart (10² m² ×
+# 0.25° / 1.1 m ≈ 0.4 m), so a wall is only cut at gaps over 0.8 m: 0.3 m cut
+# far walls short and the car saw less of the lane (6% slower); 0.6 to 1.3 m
+# all did about the same, and smaller keeps clear of real openings. The other
+# settings changed nothing measurable on the racetracks (stride, smooth,
+# spacing and curve_base by under 1%; the one-wall fallbacks never run
+# there).
+default_perception(params) = PerceptionConfig(car_halfwidth=params.width / 2, r_max=params.scan_range,
+    preview=params.scan_range, jump=0.8)
 
 # The path keeps half the car's width plus 0.15 m from every return (it
 # seldom comes that close).
@@ -172,7 +179,10 @@ default_margin(params) = params.width / 2 + 0.15
 # of the scan's errors on the tuning tracks). Process noise: 5 × the measured
 # drift of the true lane from the filter's motion model (0.10 m/s, 0.17 rad/s,
 # 0.16 1/m²), because the line followed is re-planned every scan and moves
-# more than the lane does; 3× to 8× all work.
+# more than the lane does; 3× to 8× all work. The outlier gate and the
+# curvature profile's averaging changed nothing measurable on the racetracks
+# (the speed is limited by how far ahead the lane is seen, not by its
+# curvature), so they keep their defaults.
 default_smoothing() = FilterConfig(σ_e=0.05, σ_ψ=0.075, σ_κ=0.06, q_e=0.5, q_ψ=0.85, q_κ=0.8)
 
 """
