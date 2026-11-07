@@ -93,9 +93,9 @@ rate first, so they are predicted rather than delayed. A scan far from the
 prediction is ignored, unless that keeps happening (for example, a wall came
 into view); then the filter restarts from the scan.
 
-For an example, see `examples/lane_keep.jl` in the sibling package
-StanleyController.jl, which drives an F1Tenth.jl car around 23 racetracks
-with the Stanley law.
+For an example, see the sibling package LidarRacer.jl, which races an
+F1Tenth.jl car around 23 racetracks using this package's perception and
+filter.
 
 ## Tests
 
