@@ -75,8 +75,13 @@ that path and smooths the result with an unscented Kalman filter, giving
 `e`, `ψe` and the curvature at the front axle; `steering_angle` turns them
 into a steering command; and
 [VelocityProfilePlanner.jl](../VelocityProfilePlanner.jl) sets the speed.
-The commands are held until the next scan and go to the car's own low-level
-controllers (in F1Tenth.jl).
+Each command takes effect 7.5 ms after its scan is published (computing and
+passing it on: ForzaETH's measured latency for their whole race stack on
+NUC5's computer, a cautious value for this lighter controller), is held
+until the next one, and goes to the car's own low-level controllers (in
+F1Tenth.jl). The simulator steps every 2.5 ms, so that latency is timed
+closely. The controller tolerates up to 50 ms of latency (laps 2.3%
+slower); at 100 ms it starts to hit walls.
 
 There is no cruise speed. The speed is the fastest from which the car,
 braking at the command limiter's 2.5 m/s² after a two-scan delay, reaches

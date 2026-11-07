@@ -80,11 +80,13 @@ Base.@kwdef struct SpeedConfig
 end
 
 # From the car: its top speed command, the command limiter's deceleration,
-# the turning radius at its smaller steering limit, and a delay of two scan
-# periods (one scan's sweep, then up to one period until the next decision).
-SpeedConfig(params::VehicleParams; v_max=params.speed_cmd_max, kwargs...) = SpeedConfig(; v_max,
+# the turning radius at its smaller steering limit, and the delay from a
+# scan's first beam until the next command could replace this one: the sweep
+# (`sweep` seconds), the latency until the command takes effect, and one scan
+# period until the next decision.
+SpeedConfig(params::VehicleParams; sweep, latency, v_max=params.speed_cmd_max, kwargs...) = SpeedConfig(; v_max,
     a_brake=params.decel_cmd, r_min=(params.lf + params.lr) / tan(min(params.steer_cmd_max, -params.steer_cmd_min)),
-    delay=2 / params.scan_rate, kwargs...)
+    delay=sweep + latency + 1 / params.scan_rate, kwargs...)
 
 """
     speed_command(cfg::SpeedConfig, lane::LaneEstimate, v, yaw_rate) -> v_cmd
@@ -142,13 +144,22 @@ end
 
 function LaneKeeper(params::VehicleParams, beams, lidar_dist; stanley=default_stanley(params),
                     perception=default_perception(params), smoothing=default_smoothing(),
-                    margin=default_margin(params), v_max=params.speed_cmd_max)
+                    margin=default_margin(params), latency=default_latency(), v_max=params.speed_cmd_max)
     # the front axle is lf ahead of the center of gravity, so lf - lidar_dist
     # ahead of the LiDAR, and lf + lr ahead of the rear axle
     perceive = LanePerception(beams, params.lf - lidar_dist; cfg=perception)
+    sweep = (beams[end] - beams[1]) / 2π / params.scan_rate
     return LaneKeeper(perceive, margin, LaneFilter(params.lf + params.lr; cfg=smoothing), stanley,
-        SpeedConfig(params; v_max), Float64[], Float64[])
+        SpeedConfig(params; sweep, latency, v_max), Float64[], Float64[])
 end
+
+# From a scan's publication to its command taking effect [s]: computing it
+# and passing it on. ForzaETH measured their whole race stack's latency on
+# NUC5's computer (an Intel i5-10210U) at 7.5 ms at most on average (Baumann
+# et al., "ForzaETH Race Stack", 2024, §8.1.1); this controller is lighter
+# (about 0.25 ms here), so 7.5 ms is a cautious value. No transport delay
+# (Ethernet, driver) has been published.
+default_latency() = 0.0075
 
 # The defaults below were tuned on 12 of the 23 racetracks (two LiDAR noise
 # seeds each) and checked on the other 11; each sits in the middle of a range
@@ -269,26 +280,30 @@ function wall_gap(m::F1Tenth.MapData, x, y, θ, length, width)
 end
 
 """
-    run_map(map_name; speed, laps, pose, map_ext, render, stanley, perception, smoothing, max_time) -> RunResult
+    run_map(map_name; speed, laps, pose, map_ext, render, stanley, perception, smoothing, latency,
+            timestep, max_time, seed) -> RunResult
 
 Drive `laps` laps (or until a crash or `max_time` seconds) with a
-[`LaneKeeper`](@ref); `speed` caps the speed, `stanley`, `perception` and
-`smoothing` replace its defaults, and `seed` seeds the LiDAR noise.
+[`LaneKeeper`](@ref); `speed` caps the speed, `stanley`, `perception`,
+`smoothing` and `latency` replace its defaults, `timestep` is the
+simulator's step [s] (it also sets how precisely a command's latency is
+timed), and `seed` seeds the LiDAR noise.
 """
 function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", render=false,
-                 stanley=nothing, perception=nothing, smoothing=default_smoothing(), max_time=600.0, seed=12345)
+                 stanley=nothing, perception=nothing, smoothing=default_smoothing(), latency=default_latency(),
+                 timestep=0.0025, max_time=600.0, seed=12345)
     path = centerline(map_name)
     if pose === nothing
         path === nothing && error("$map_name is not a racetrack; give a start pose with --pose X Y THETA")
         pose = (path.x[1], path.y[1], path.heading[1])
     end
-    dt = 0.01
-    env = F110Env(; map=map_name, map_ext, num_agents=1, timestep=dt, integrator=Integrator.RK4, seed)
+    env = F110Env(; map=map_name, map_ext, num_agents=1, timestep, integrator=Integrator.RK4, seed)
     walls = env.sim.scan_simulator.map
     params = env.params
     keeper = LaneKeeper(params, env.sim.agents[1].lidar.scan_angles, env.lidar_dist;
         stanley=something(stanley, default_stanley(params)), perception=something(perception, default_perception(params)),
-        smoothing, v_max=something(speed, params.speed_cmd_max))
+        smoothing, latency, v_max=something(speed, params.speed_cmd_max))
+    sweep = keeper.speed.delay - latency - 1 / params.scan_rate
     perceive = keeper.perceive
 
     render && add_render_callback!(env, e -> render_callback(e, env, keeper))
@@ -299,6 +314,8 @@ function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", 
     sum_off, max_off, sum_e2, sum_ψ2 = 0.0, 0.0, 0.0, 0.0
     hint = 0
     last_scan, steer, v_cmd = -Inf, 0.0, 0.0
+    # commands on their way, oldest first: (time it takes effect, steer, speed)
+    pending = Tuple{Float64,Float64,Float64}[]
     start = time()
     # The env reports `done` after 2 laps (as in Python), so stop on our own
     # lap count, or on a crash.
@@ -309,13 +326,15 @@ function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", 
 
         truth = path === nothing ? nothing : tracking_error(path, x, y, θ; hint, window=hint == 0 ? 0 : 30)
         truth === nothing || (hint = truth.segment)
-        # The LiDAR publishes a scan every 1/scan_rate seconds and holds it in
-        # between. As on the real car, the controller runs once per new scan
-        # and its command is held until the next.
+        # The LiDAR publishes a scan every 1/scan_rate seconds, when its sweep
+        # ends, and holds it in between. As on the real car, the controller
+        # runs once per new scan; its command takes effect `latency` after the
+        # scan's publication and is held until the next.
         if obs.scan_times[1] != last_scan
             scan_dt = isfinite(last_scan) ? obs.scan_times[1] - last_scan : 1 / params.scan_rate
             last_scan = obs.scan_times[1]
-            steer, v_cmd, lane = control!(keeper, obs.scans[1], v, r, scan_dt)
+            new_steer, new_speed, lane = control!(keeper, obs.scans[1], v, r, scan_dt)
+            push!(pending, (last_scan + sweep + latency, new_steer, new_speed))
             scans += 1
             lane.walls === :both || (single += 1)
             if truth !== nothing && length(perceive.center_x) >= 3
@@ -325,6 +344,9 @@ function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", 
                 sum_e2 += (seen.e - fa.e)^2
                 sum_ψ2 += wrap_angle(seen.ψe - fa.ψe)^2
             end
+        end
+        while !isempty(pending) && env.current_time >= pending[1][1] - 1e-9
+            _, steer, v_cmd = popfirst!(pending)
         end
         obs, step_time, _, _ = step!(env, [steer v_cmd])
         render && render!(env; mode=:human_fast)
