@@ -11,12 +11,14 @@ is in it, for any lane-keeping or path-tracking controller:
   law, the rear axle for pure pursuit), against the center or a planned
   path;
 - the curvature ahead, how far ahead the line is seen, and the free
-  distance straight ahead, for choosing a speed.
+  distance ahead along any arc, for choosing a speed.
 
 Per scan ([`LanePerception`](@ref)): [`detect_lane!`](@ref) finds the lane,
-[`lane_corridor`](@ref) gives the room around its center, and
-[`measure!`](@ref) measures the vehicle against a line;
-[`estimate_lane!`](@ref) does the first and the last against the center.
+[`lane_corridor`](@ref) gives the room around its center,
+[`measure!`](@ref) measures the vehicle against a line, and
+[`clearance`](@ref) gives the free distance ahead along an arc;
+[`estimate_lane!`](@ref) does `detect_lane!` then `measure!` against the
+center.
 [`track!`](@ref) combines the scans over time with an unscented Kalman filter
 ([`LaneFilter`](@ref)), which removes most of the scan noise.
 
@@ -29,7 +31,7 @@ using KalmanFilters
 using LinearAlgebra
 using PrecompileTools
 
-export PerceptionConfig, LanePerception, LaneEstimate, estimate_lane!, detect_lane!, measure!, lane_corridor, PROFILE_STEP
+export PerceptionConfig, LanePerception, LaneEstimate, estimate_lane!, detect_lane!, measure!, lane_corridor, clearance, PROFILE_STEP
 export FilterConfig, LaneFilter, track!
 
 include("geometry.jl")

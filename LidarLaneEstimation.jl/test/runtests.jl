@@ -47,7 +47,9 @@ end
         @test lane.walls === :both
         @test abs(lane.e) < 0.02 && abs(lane.ψe) < 0.02 && abs(lane.κ) < 0.02
         @test lane.width ≈ 2.0 atol = 0.05
-        @test lane.clearance ≈ MAX_RANGE - X_REF atol = 0.01   # nothing ahead
+        p = LanePerception(ANGLES, X_REF)
+        detect_lane!(p, scan(straight_lane()))
+        @test clearance(p) ≈ MAX_RANGE - X_REF atol = 0.01   # nothing ahead
         # the walls are seen out to r_max, so the center line reaches at most
         # √(r_max² - 1) ahead of the LiDAR (less the ends lost to smoothing)
         @test 4.5 < lane.sight < sqrt(PerceptionConfig().r_max^2 - 1) - X_REF
@@ -79,7 +81,6 @@ end
         # sharp, which only makes the speed choice cautious
         @test all(isapprox.(lane.κ_profile[1:9], 1 / R; rtol=0.05))
         @test 1 / R <= lane.κ_ahead <= 1.8 / R
-        # the same turning right
         right = [[(x, -y) for (x, y) in w] for w in left]
         lane = estimate_lane!(LanePerception(ANGLES, X_REF), scan(right))
         @test lane.κ ≈ -1 / R rtol = 0.1
@@ -91,8 +92,26 @@ end
     end
 
     @testset "clearance" begin
+        p = LanePerception(ANGLES, X_REF)
         walls = vcat(straight_lane(), [[(5.0, -2.0), (5.0, 2.0)]])
-        @test estimate_lane!(LanePerception(ANGLES, X_REF), scan(walls)).clearance ≈ 5.0 - X_REF atol = 0.01
+        detect_lane!(p, scan(walls))
+        @test clearance(p) ≈ 5.0 - X_REF atol = 0.01
+        @test clearance(p, 0.0) == clearance(p)
+        # along a curve: a lane turning left around (X_REF, R), closed by a wall
+        # across it 1 rad of turn ahead. Straight ahead, the outer wall is
+        # nearer; along the arc, the wall across the lane is R × 1 rad away.
+        R, φ = 5.0, 1.0
+        across = [(X_REF + r * sin(φ), R - r * cos(φ)) for r in (R - 1.1, R + 1.1)]
+        bend = [arc(X_REF, R, R - 1, -π / 2 - 0.5, π / 2), arc(X_REF, R, R + 1, -π / 2 - 0.5, π / 2), across]
+        detect_lane!(p, scan(bend))
+        straight = clearance(p)
+        hw = PerceptionConfig().car_halfwidth   # where the corridor's right edge meets the outer wall
+        @test straight ≈ sqrt((R + 1)^2 - (R + hw)^2) atol = 0.02
+        @test clearance(p, 1 / R) ≈ R * φ atol = 0.02
+        # turning the wrong way: the outer wall is in the way sooner
+        @test clearance(p, -1 / R) < straight
+        detect_lane!(p, scan([[(x, -y) for (x, y) in w] for w in bend]))
+        @test clearance(p, -1 / R) ≈ R * φ atol = 0.02
     end
 
     @testset "one wall" begin
@@ -137,7 +156,7 @@ end
         @test measure!(p, [0.0, 1.0, 2.0], [0.0, 0.0, 0.0]).walls === :none
     end
 
-    estimate(e, ψe; κ=0.0) = LaneEstimate(e, ψe, κ, abs(κ), 2.0, :both, 10.0, fill(κ, 17), 4.0)
+    estimate(e, ψe; κ=0.0) = LaneEstimate(e, ψe, κ, abs(κ), 2.0, :both, fill(κ, 17), 4.0)
 
     @testset "filter: noise" begin
         f = LaneFilter(WHEELBASE)
@@ -176,7 +195,7 @@ end
         outs = [track!(f, estimate(0.5, 1.0), 3.0, 0.0, 0.01) for _ in 1:3]   # the lane really moved
         @test abs(outs[2].ψe) < 0.01 && outs[3].ψe ≈ 1.0 && outs[3].e ≈ 0.5
         # with no lane in view the prediction carries on
-        none = LaneEstimate(0.0, 0.0, 0.0, 0.0, 2.0, :none, Inf, fill(NaN, 17), 0.0)
+        none = LaneEstimate(0.0, 0.0, 0.0, 0.0, 2.0, :none, fill(NaN, 17), 0.0)
         @test track!(f, none, 3.0, 0.0, 0.01).ψe ≈ 1.0 atol = 0.01
         # the curvature ahead is averaged, but a sharp turn is taken at once
         f = LaneFilter(WHEELBASE)

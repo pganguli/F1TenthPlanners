@@ -11,6 +11,7 @@
 #    too.
 # lane_corridor: how far each point of the center may move sideways while
 #    keeping a margin from every return (for a path planner).
+# clearance: the free distance ahead along an arc (for choosing a speed).
 # measure!: the reference point against a line (the center, or a planned
 #    path): errors, curvature ahead, and how far ahead the line reaches.
 
@@ -57,8 +58,8 @@ Base.@kwdef struct PerceptionConfig
     # curve. A controller that slows for curves ahead can brake earlier with a
     # larger value; past what the scan sees, the profile is NaN.
     preview::Float64 = 4.0
-    # Half-width of the corridor straight ahead in which `clearance` is
-    # measured [m], about half the vehicle's width. Larger is more cautious
+    # Half-width of the band along an arc in which `clearance` is measured
+    # [m], about half the vehicle's width. Larger is more cautious
     # (it catches the walls beside the vehicle); smaller can miss a wall its
     # corner will hit.
     car_halfwidth::Float64 = 0.2
@@ -83,7 +84,6 @@ Where the vehicle is in the lane, all measured at the reference point (see
 - `walls`: which walls were used: `:both`; `:left` or `:right` alone (the
   center is half a lane width in from it); `:merged`, one wall seen on both
   sides, deep in a hairpin; or `:none`, when the other numbers are zero.
-- `clearance`: the free distance straight ahead [m].
 - `κ_profile`: the signed curvature every `PROFILE_STEP` meters ahead, NaN
   where the scan doesn't reach.
 - `sight`: how far the line reaches ahead of the reference point [m]; what
@@ -96,7 +96,6 @@ struct LaneEstimate
     κ_ahead::Float64
     width::Float64
     walls::Symbol
-    clearance::Float64
     κ_profile::Vector{Float64}
     sight::Float64
 end
@@ -118,8 +117,8 @@ After [`detect_lane!`](@ref) (or [`estimate_lane!`](@ref)), the fields
 `center_x` and `center_y` hold the lane center in the LiDAR frame (x
 forward, y left), in driving order, for controllers that work on the line
 itself (such as pure pursuit), for path planners, or for drawing; `walls`
-says which walls it came from, and `clearance` is the free distance straight
-ahead.
+says which walls it came from. [`clearance`](@ref) measures the free distance
+ahead in the same scan.
 """
 mutable struct LanePerception
     cfg::PerceptionConfig
@@ -134,7 +133,6 @@ mutable struct LanePerception
     center_x::Vector{Float64}     # the lane center (LiDAR frame)
     center_y::Vector{Float64}
     walls::Symbol                 # which walls it came from (see LaneEstimate)
-    clearance::Float64            # free distance straight ahead
     widths::Vector{Float64}       # recent lane width measurements (a ring buffer)
     widths_sorted::Vector{Float64}   # the same, sorted (for the median)
     width_next::Int
@@ -152,7 +150,7 @@ function LanePerception(angles::AbstractVector{<:Real}, x_ref::Real; cfg::Percep
     issorted(angles) || throw(ArgumentError("beam angles must be in increasing (counterclockwise) order"))
     a = collect(Float64, angles)
     return LanePerception(cfg, a, cos.(a), sin.(a), x_ref, zeros(n), zeros(n), Int[], Int[],
-        Float64[], Float64[], :none, Inf, Float64[], Float64[], 1, NaN, false, 0.0, Float64[], Float64[], Float64[])
+        Float64[], Float64[], :none, Float64[], Float64[], 1, NaN, false, 0.0, Float64[], Float64[], Float64[])
 end
 
 LanePerception(num_beams::Integer, fov::Real, x_ref::Real; cfg::PerceptionConfig=PerceptionConfig()) =
@@ -343,8 +341,7 @@ end
 Find the lane in one scan (`ranges[i]` is the distance measured by beam `i`
 [m]): its center (`p.center_x`, `p.center_y`), which walls it came from
 (returned, and kept in `p.walls`: `:both`, `:left`, `:right`, `:merged`, or
-`:none` when no lane was found), and the free distance straight ahead
-(`p.clearance`).
+`:none` when no lane was found).
 """
 function detect_lane!(p::LanePerception, ranges::AbstractVector{<:Real})
     length(ranges) == length(p.angles) ||
@@ -354,12 +351,6 @@ function detect_lane!(p::LanePerception, ranges::AbstractVector{<:Real})
     @inbounds @simd for i in eachindex(ranges, xs)
         xs[i] = ranges[i] * cos_a[i]
         ys[i] = ranges[i] * sin_a[i]
-    end
-    clearance = Inf
-    @inbounds for i in eachindex(xs)
-        if xs[i] > 0 && abs(ys[i]) <= cfg.car_halfwidth
-            clearance = min(clearance, xs[i] - p.x_ref)
-        end
     end
     _walls!(p, ranges)
 
@@ -388,8 +379,42 @@ function detect_lane!(p::LanePerception, ranges::AbstractVector{<:Real})
     end
     p.center_x, p.center_y = cx, cy
     p.walls = _usable(cx, cy, cfg) ? walls : :none
-    p.clearance = clearance
     return p.walls
+end
+
+"""
+    clearance(p::LanePerception, κ=0.0) -> d
+
+The free distance ahead [m] in the scan last given to [`detect_lane!`](@ref),
+along the arc of curvature `κ` [1/m] (`> 0` turning left; 0 is straight
+ahead) that leaves the reference point in the vehicle's direction: the arc
+length to the first return within `car_halfwidth` of the arc, over at most
+half a turn. `Inf` if nothing is in the way.
+
+In a turn, the wall straight ahead is the outer wall the vehicle is turning
+away from. Measure along the arc it is driving on (its yaw rate over its
+speed), or along a path it will follow (that path's curvature).
+"""
+function clearance(p::LanePerception, κ::Real=0.0)
+    hw = p.cfg.car_halfwidth
+    best = Inf
+    if abs(κ) < 1e-6
+        @inbounds for i in eachindex(p.xs)
+            dx = p.xs[i] - p.x_ref
+            dx > 0 && abs(p.ys[i]) <= hw && (best = min(best, dx))
+        end
+        return best
+    end
+    R = 1 / κ   # the arc's center is at (x_ref, R)
+    @inbounds for i in eachindex(p.xs)
+        dx, dy = p.xs[i] - p.x_ref, p.ys[i] - R
+        abs(hypot(dx, dy) - abs(R)) <= hw || continue
+        # angle swept around the center, in the direction of travel, from the
+        # reference point (at (0, -R) from the center)
+        φ = sign(κ) * atan(R * dx, -R * dy)
+        φ > 0 && (best = min(best, φ * abs(R)))
+    end
+    return best
 end
 
 """
@@ -401,9 +426,9 @@ Where the reference point is relative to the line through `(x[i], y[i])`
 With no lane found, `walls` is `:none` and the errors are zero.
 """
 function measure!(p::LanePerception, x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
-    cfg, walls, clearance = p.cfg, p.walls, p.clearance
+    cfg, walls = p.cfg, p.walls
     if walls === :none || length(x) < 2
-        return LaneEstimate(0.0, 0.0, 0.0, 0.0, p.width, :none, clearance, fill(NaN, length(_profile_offsets(cfg))), 0.0)
+        return LaneEstimate(0.0, 0.0, 0.0, 0.0, p.width, :none, fill(NaN, length(_profile_offsets(cfg))), 0.0)
     end
     line = _Polyline(x, y)
     err = _project(line, p.x_ref, 0.0)   # the vehicle faces +x
@@ -421,7 +446,7 @@ function measure!(p::LanePerception, x::AbstractVector{<:Real}, y::AbstractVecto
     # signed curvature every PROFILE_STEP meters ahead, NaN past what the scan sees
     profile = [dir * _curvature_at(line, err.s + dir * d, cfg.curve_base) for d in _profile_offsets(cfg)]
     sight = max(dir == 1 ? line.s[end] - err.s : err.s, 0.0)
-    return LaneEstimate(e, ψe, κ, _sharpest(profile, κ), p.width, walls, clearance, profile, sight)
+    return LaneEstimate(e, ψe, κ, _sharpest(profile, κ), p.width, walls, profile, sight)
 end
 
 """

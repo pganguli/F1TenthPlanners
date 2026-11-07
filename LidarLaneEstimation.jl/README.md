@@ -15,7 +15,7 @@ Each estimate gives:
   axle for pure pursuit, or the center of gravity for most LQR and MPC
   models), against the center or a path planned through the lane;
 - the curvature ahead, how far ahead the line is seen, and the free distance
-  straight ahead, for choosing a speed.
+  ahead along any arc, for choosing a speed.
 
 ## Use
 
@@ -31,7 +31,8 @@ smooth = LaneFilter(0.257)
 # every scan (ranges in meters), with the vehicle's speed and yaw rate
 lane = track!(smooth, estimate_lane!(perceive, ranges), v, yaw_rate, dt)
 lane.e, lane.ψe, lane.κ                     # where the vehicle is in the lane
-lane.κ_profile, lane.sight, lane.clearance  # for the speed
+lane.κ_profile, lane.sight                  # for the speed
+clearance(perceive, yaw_rate / v)           # free distance along the arc it drives on
 perceive.center_x, perceive.center_y        # the lane center, in the LiDAR frame
 ```
 
@@ -82,6 +83,12 @@ the scan limits a point, it may move half the lane width from the center.
 **Measuring** (`measure!`): the reference point projected onto any line
 through the lane, giving `e`, `ψe`, the curvature there and every
 `PROFILE_STEP` (0.25 m) ahead, and how far ahead the line reaches.
+
+**Clearance** (`clearance`): the free distance along an arc that leaves the
+reference point straight ahead, to the first return within
+`car_halfwidth` of it. In a turn, the wall straight ahead is the outer wall
+the vehicle is turning away from, so measure along the arc it is driving on
+(its yaw rate over its speed) or along a path it will follow.
 
 One scan's heading error is off by a few degrees, which makes a vehicle
 twitch at speed. `track!` combines the scans with an unscented Kalman filter
