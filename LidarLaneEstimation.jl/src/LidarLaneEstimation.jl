@@ -5,13 +5,18 @@ Finds the lane between two walls in a 2D LiDAR scan and where the vehicle
 is in it, for any lane-keeping or path-tracking controller:
 
 - the lane's center line ahead, as points in the vehicle frame;
+- the free corridor around it, for a path planner;
 - the cross-track error `e`, heading error `ψe` and curvature `κ` at a
   reference point you choose (for example the front axle for the Stanley
-  law, the rear axle for pure pursuit);
-- the sharpest curvature ahead and the free distance straight ahead, for
-  choosing a speed.
+  law, the rear axle for pure pursuit), against the center or a planned
+  path;
+- the curvature ahead, how far ahead the line is seen, and the free
+  distance straight ahead, for choosing a speed.
 
-[`estimate_lane!`](@ref) works on one scan ([`LanePerception`](@ref)), and
+Per scan ([`LanePerception`](@ref)): [`detect_lane!`](@ref) finds the lane,
+[`lane_corridor`](@ref) gives the room around its center, and
+[`measure!`](@ref) measures the vehicle against a line;
+[`estimate_lane!`](@ref) does the first and the last against the center.
 [`track!`](@ref) combines the scans over time with an unscented Kalman filter
 ([`LaneFilter`](@ref)), which removes most of the scan noise.
 
@@ -24,12 +29,12 @@ using KalmanFilters
 using LinearAlgebra
 using PrecompileTools
 
-export PerceptionConfig, LanePerception, LaneEstimate, estimate_lane!, PROFILE_STEP
+export PerceptionConfig, LanePerception, LaneEstimate, estimate_lane!, detect_lane!, measure!, lane_corridor, PROFILE_STEP
 export FilterConfig, LaneFilter, track!
 
 include("geometry.jl")
 include("perception.jl")
-include("raceline.jl")
+include("corridor.jl")
 include("filter.jl")
 include("precompile.jl")
 

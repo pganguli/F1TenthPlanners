@@ -7,12 +7,12 @@
     # the same with the left wall missing
     one_wall = [a > 0 ? 30.0 : r for (a, r) in zip(angles, corridor)]
     @compile_workload begin
-        for line in (:center, :min_curvature)
-            p = LanePerception(1081, 3π / 2, 0.13; cfg=PerceptionConfig(; line))
-            f = LaneFilter(0.257)
-            for ranges in (corridor, corridor, one_wall, corridor)
-                track!(f, estimate_lane!(p, ranges), 5.0, 0.1, 0.01)
-            end
+        p = LanePerception(1081, 3π / 2, 0.13)
+        f = LaneFilter(0.257)
+        for ranges in (corridor, corridor, one_wall, corridor)
+            track!(f, estimate_lane!(p, ranges), 5.0, 0.1, 0.01)
+            c = lane_corridor(p, 0.3)
+            c === nothing || measure!(p, c.x, c.y)
         end
     end
 end

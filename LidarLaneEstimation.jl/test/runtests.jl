@@ -107,45 +107,34 @@ end
         @test estimate_lane!(p, fill(MAX_RANGE, length(ANGLES))).walls === :none
     end
 
-    @testset "box-constrained QP" begin
-        # against projected gradient descent, run to convergence
-        H = [4.0 1.0 0.5; 1.0 3.0 0.2; 0.5 0.2 2.0]
-        g = [-8.0, 3.0, -1.0]
-        lb, ub = [-1.0, -0.5, -2.0], [1.0, 0.5, 0.1]
-        x = zeros(3)
-        for _ in 1:20000
-            x = clamp.(x .- 0.05 .* (H * x .+ g), lb, ub)
-        end
-        @test LidarLaneEstimation._box_qp(H, g, lb, ub) ≈ x atol = 1e-8
-    end
-
-    @testset "minimum-curvature line" begin
-        @test_throws ArgumentError LanePerception(ANGLES, X_REF; cfg=PerceptionConfig(line=:racing))
-        cfg = PerceptionConfig(line=:min_curvature, wall_margin=0.3)
-        # the sharpest turn along the line, and its closest approach to a return
-        function sharpest(xs, ys)
-            l = LidarLaneEstimation._Polyline(xs, ys)
-            maximum(abs(k) for k in (LidarLaneEstimation._curvature_at(l, s, 0.6) for s in 0:0.1:l.s[end])
-                    if !isnan(k); init=0.0)
-        end
-        gap(p) = minimum(hypot(p.xs[j] - x, p.ys[j] - y) for (x, y) in zip(p.cx, p.cy)
-                         for j in eachindex(p.xs) if hypot(p.xs[j], p.ys[j]) <= p.cfg.r_max)
-        # on a straight it is the lane center
-        p = LanePerception(ANGLES, X_REF; cfg)
-        lane = estimate_lane!(p, scan(straight_lane(offset=0.2)))
-        @test lane.e ≈ 0.2 atol = 0.02
-        @test abs(lane.ψe) < 0.02
-        @test maximum(abs, p.cy .- 0.2) < 0.02
-        # a hairpin to the left, lane 2.2 m wide, center radius 0.6 m: the line
-        # swings out, bends far less than the center and keeps its margin
+    @testset "corridor and measuring against other lines" begin
+        # a straight lane 2 m wide, its center 0.2 m to the left
+        p = LanePerception(ANGLES, X_REF)
+        @test detect_lane!(p, scan(straight_lane(offset=0.2))) === :both
+        c = lane_corridor(p, 0.3)
+        @test all(abs.(c.ny .- 1) .< 0.01)                       # normals point left
+        ahead = c.x .> 0   # (behind the vehicle, the walls run out at the scan's edge)
+        @test all(isapprox.(c.upper[ahead], 0.7; atol=0.03)) && all(isapprox.(c.lower[ahead], -0.7; atol=0.03))
+        @test all(c.lower .<= 0 .<= c.upper)
+        @test all(isapprox.(diff(c.x), 0.2; atol=0.01))         # resampled every step
+        # measuring against the center line shifted by α gives e - α
+        @test measure!(p, c.x, c.y .+ 0.3).e ≈ estimate_lane!(p, scan(straight_lane(offset=0.2))).e + 0.3 atol = 1e-9
+        # a hairpin to the left, lane 2.2 m wide: every allowed point keeps the margin
         hairpin = [[(-5.0, 0.5), (1.5, 0.5), (1.5, 0.7), (-5.0, 0.7)],
                    vcat([(-5.0, -1.1)], arc(1.5, 0.6, 1.7, -π / 2, π / 2), [(-5.0, 2.3)])]
-        p = LanePerception(ANGLES, X_REF; cfg)
+        p = LanePerception(ANGLES, X_REF)
         p.width = 2.2
-        lane = estimate_lane!(p, scan(hairpin))
-        @test sharpest(p.cx, p.cy) < 0.65 * sharpest(p.center_x, p.center_y)
-        @test gap(p) >= 0.3 - 1e-3   # (the planner checks every stride-th return)
-        @test lane.e < -0.3   # already out to the right of the center, before the turn
+        detect_lane!(p, scan(hairpin))
+        c = lane_corridor(p, 0.3)
+        returns = [(p.xs[j], p.ys[j]) for j in eachindex(p.xs) if hypot(p.xs[j], p.ys[j]) <= p.cfg.r_max]
+        for (i, a) in ((i, a) for i in eachindex(c.x) for a in (c.lower[i], c.upper[i]))
+            px, py = c.x[i] + a * c.nx[i], c.y[i] + a * c.ny[i]
+            @test minimum(hypot(px - qx, py - qy) for (qx, qy) in returns) >= 0.3 - 1e-3   # (every stride-th return is checked)
+        end
+        # no lane: no corridor, and measuring reports none
+        @test detect_lane!(p, fill(MAX_RANGE, length(ANGLES))) === :none
+        @test lane_corridor(p, 0.3) === nothing
+        @test measure!(p, [0.0, 1.0, 2.0], [0.0, 0.0, 0.0]).walls === :none
     end
 
     estimate(e, ψe; κ=0.0) = LaneEstimate(e, ψe, κ, abs(κ), 2.0, :both, 10.0, fill(κ, 17), 4.0)
