@@ -1,18 +1,24 @@
 # Lane keeping on F1Tenth maps with the Stanley controller, using only the LiDAR.
 #
-# The walls are the lane boundaries. Each step, the scan is turned into the
-# two numbers the Stanley law needs, measured at the front axle:
+# The walls are the lane boundaries. Each scan, the sibling package
+# LidarLaneEstimation.jl finds the lane, plans the line through it that bends
+# least (in wide before a corner, close to the inside at its apex), and turns
+# the scan into the two numbers the Stanley law needs, measured at the front
+# axle:
 #
-#   e   cross-track error: how far the lane center is to the left [m]
-#   ψe  heading error: the lane direction relative to the car [rad]
+#   e   cross-track error: how far that line is to the left [m]
+#   ψe  heading error: the line's direction relative to the car [rad]
 #
-# plus the lane curvature ahead and the free distance straight ahead, which
-# set the speed (a fixed cruise speed, lower in turns). The scan processing
-# and the Kalman filter that smooths it over time are in the sibling package
-# LidarLaneEstimation.jl. The controller never
-# sees the car's pose or the map. For the f1tenth_racetracks maps the track's
-# centerline file is used only to place the car at the start line and to
-# score how well it stays centered.
+# plus the line's curvature ahead, how far ahead it is seen and the free
+# distance straight ahead, which set the speed: as fast as the car can still
+# slow down in time for what it sees, and for what it may not see yet. A
+# Kalman filter in the same package smooths them over time. The controller
+# (`LaneKeeper`) never sees the car's pose or the map. For the
+# f1tenth_racetracks maps the track's centerline file is used only to place
+# the car at the start line and to score the run.
+#
+# It needs the realistic-dynamics branch of F1Tenth.jl: the car's actuator
+# limits, its 40 Hz LiDAR and `obs.scan_times`.
 #
 #     julia --project=examples examples/lane_keep.jl Spa             # one lap, prints a score
 #     julia --project=examples examples/lane_keep.jl Spa --render    # watch it (needs a display)
@@ -33,7 +39,7 @@ MAP is a racetrack name (Austin, Sochi, Spa, Shanghai, ...), "all" for every
 racetrack, or any ROS map yaml path (without .yaml) together with --pose.
 
 options:
-  --speed V        cruise speed in m/s (default 5.0)
+  --speed V        cap the speed at V m/s (default: the car's top speed)
   --laps N         laps to drive (default 1)
   --pose X Y THETA start pose; required for maps that are not racetracks
   --map-ext EXT    image extension of a custom map (default .png)
@@ -44,29 +50,119 @@ options:
 # Speed
 
 """
-    SpeedConfig(; kwargs...)
+    SpeedConfig(params::VehicleParams; v_max=params.speed_cmd_max, kwargs...)
 
-Cruise speed and the limits that lower it.
+The limits that set the speed. There is no cruise speed: the car goes as
+fast as it can still slow down in time for every curve it sees, and for the
+sharpest curve it could meet just past what it sees.
 """
 Base.@kwdef struct SpeedConfig
-    cruise::Float64 = 5.0     # the fixed speed on straights [m/s]
+    v_max::Float64            # never faster than this [m/s]
     v_min::Float64 = 1.0      # never slower than this [m/s]
-    a_lat::Float64 = 4.0      # lateral acceleration allowed in turns [m/s²]
-    a_brake::Float64 = 4.0    # deceleration assumed for the free distance ahead [m/s²]
+    # Lateral acceleration planned for turns [m/s²]: about half the tires'
+    # peak grip (1.0 g at the rear; the front, which slides first, gives
+    # 0.77 g at 0.2 rad of slip), leaving the rest for steering corrections
+    # and braking. Every racetrack lap finishes from 2 to 6 m/s².
+    a_lat::Float64 = 5.0
+    a_brake::Float64          # deceleration the car can count on [m/s²]
+    r_min::Float64            # the car's tightest turning radius [m]
+    # Time from a scan's first beam until the car acts on it, and the speed
+    # command changes [s]. The car drives on meanwhile.
+    delay::Float64
     margin::Float64 = 0.5     # distance to keep from a wall straight ahead [m]
 end
 
-"""
-    target_speed(cfg::SpeedConfig, lane::LaneEstimate) -> v
+# From the car: its top speed command, the command limiter's deceleration,
+# the turning radius at its smaller steering limit, and a delay of two scan
+# periods (one scan's sweep, then up to one period until the next decision).
+SpeedConfig(params::VehicleParams; v_max=params.speed_cmd_max, kwargs...) = SpeedConfig(; v_max,
+    a_brake=params.decel_cmd, r_min=(params.lf + params.lr) / tan(min(params.steer_cmd_max, -params.steer_cmd_min)),
+    delay=2 / params.scan_rate, kwargs...)
 
-The cruise speed, lowered so that the sharpest curve ahead keeps the lateral
-acceleration at most `a_lat`, and so that the vehicle can stop within the
-free distance straight ahead.
 """
-function target_speed(cfg::SpeedConfig, lane::LaneEstimate)
-    v = curvature_speed(lane.κ_ahead; v_max=cfg.cruise, a_lat=cfg.a_lat, v_min=cfg.v_min)
-    v_clear = sqrt(cfg.v_min^2 + 2cfg.a_brake * max(lane.clearance - cfg.margin, 0.0))
-    return clamp(min(v, v_clear), cfg.v_min, cfg.cruise)
+    target_speed(cfg::SpeedConfig, lane::LaneEstimate, v, yaw_rate) -> v_cmd
+
+The fastest speed from which the car, braking at `a_brake` after `delay`,
+reaches every point of the line ahead no faster than that point's curve
+allows (lateral acceleration at most `a_lat`). Past the line's end
+(`lane.sight`), it assumes a curve as sharp as the car can turn. Also kept:
+lateral acceleration in the turn the car is making now (speed × yaw rate) at
+most `a_lat`, and stopping room for a wall straight ahead.
+"""
+function target_speed(cfg::SpeedConfig, lane::LaneEstimate, v, yaw_rate)
+    coast = cfg.delay * abs(v)   # driven before the car reacts
+    reach(v_end, d) = sqrt(v_end^2 + 2cfg.a_brake * max(d - coast, 0.0))
+    corner(κ) = curvature_speed(κ; v_max=Inf, a_lat=cfg.a_lat)
+    limit = reach(corner(1 / cfg.r_min), lane.sight)
+    for (j, κ) in enumerate(lane.κ_profile)
+        d = (j - 1) * PROFILE_STEP
+        d > lane.sight && break
+        isnan(κ) || (limit = min(limit, reach(corner(κ), d)))
+    end
+    limit = min(limit, cfg.a_lat / max(abs(yaw_rate), eps()), reach(cfg.v_min, lane.clearance - cfg.margin))
+    return clamp(limit, cfg.v_min, cfg.v_max)
+end
+
+# ---------------------------------------------------------------------------
+# The controller: what runs on the car, from a scan to a command
+
+"""
+    LaneKeeper(params, beams, lidar_dist; stanley, perception, smoothing, v_max)
+
+The on-board controller of a car with parameters `params` and a LiDAR whose
+beams point at `beams` [rad], `lidar_dist` meters ahead of the center of
+gravity: lane perception, the Kalman filter, the Stanley law (which measures
+the errors at the front axle) and the speed limits.
+"""
+struct LaneKeeper
+    perceive::LanePerception
+    smooth::LaneFilter
+    stanley::Stanley
+    speed::SpeedConfig
+end
+
+function LaneKeeper(params::VehicleParams, beams, lidar_dist; stanley=default_stanley(params),
+                    perception=default_perception(params), smoothing=default_smoothing(), v_max=params.speed_cmd_max)
+    # the front axle is lf ahead of the center of gravity, so lf - lidar_dist
+    # ahead of the LiDAR, and lf + lr ahead of the rear axle
+    perceive = LanePerception(beams, params.lf - lidar_dist; cfg=perception)
+    return LaneKeeper(perceive, LaneFilter(params.lf + params.lr; cfg=smoothing), stanley, SpeedConfig(params; v_max))
+end
+
+# The defaults below were tuned on 12 of the 23 racetracks (two LiDAR noise
+# seeds each) and checked on the other 11; each sits in the middle of a range
+# of values that all finish every lap.
+
+# Yaw damping (Hoffmann et al.) lets the cross-track gain be stiff despite
+# the servo lag: without it the car weaves from k = 3 on; with k_yaw = 0.1,
+# every k from 2 to 5 finishes. The softening speed hardly matters.
+default_stanley(params) = Stanley(k=3.0, k_soft=1.0, k_yaw=0.1, max_steer=params.s_max)
+
+# Follow the minimum-curvature line, keeping half the car's width plus
+# 0.15 m from the walls (it seldom comes that close), using returns out to
+# 8 m (10 m, the LiDAR's rated range, adds sparse, noisy points that cost
+# wall clearance for no gain), with the curvature as far ahead as that.
+default_perception(params) = PerceptionConfig(car_halfwidth=params.width / 2, line=:min_curvature,
+    wall_margin=params.width / 2 + 0.15, r_max=8.0, preview=8.0)
+
+# Scan noise as measured against the true lane center (standard deviations
+# of the scan's errors on the tuning tracks). Process noise: 5 × the measured
+# drift of the true lane from the filter's motion model (0.10 m/s, 0.17 rad/s,
+# 0.16 1/m²), because the line followed is re-planned every scan and moves
+# more than the lane does; 3× to 8× all work.
+default_smoothing() = FilterConfig(σ_e=0.05, σ_ψ=0.075, σ_κ=0.06, q_e=0.5, q_ψ=0.85, q_κ=0.8)
+
+"""
+    control!(k::LaneKeeper, ranges, v, yaw_rate, dt) -> (steer, speed, lane)
+
+The steering angle [rad] and speed [m/s] to command for a new scan `ranges`,
+given the measured speed and yaw rate and the time `dt` since the last scan,
+with the lane estimate they came from.
+"""
+function control!(k::LaneKeeper, ranges, v, yaw_rate, dt)
+    lane = track!(k.smooth, estimate_lane!(k.perceive, ranges), v, yaw_rate, dt)
+    steer = steering_angle(k.stanley, lane.e, lane.ψe, v; yaw_rate, path_yaw_rate=lane.κ * v)
+    return steer, target_speed(k.speed, lane, v, yaw_rate), lane
 end
 
 # ---------------------------------------------------------------------------
@@ -89,9 +185,11 @@ end
     RunResult
 
 Outcome of one run. Offsets are distances of the car's reference point from
-the track centerline; perception errors compare the LiDAR estimates with
-the true errors at the front axle. Map-based numbers are NaN without a
-centerline.
+the track centerline (the car follows its own line, so some offset is
+intended); perception errors compare the lane center found in each scan
+with the true centerline, at the front axle. Centerline-based numbers are
+NaN without a centerline. `min_gap` is the closest the car's body came to a
+wall, from the map.
 """
 struct RunResult
     map::String
@@ -103,79 +201,122 @@ struct RunResult
     mean_speed::Float64
     e_rmse::Float64
     ψe_rmse::Float64
-    single_wall::Float64      # fraction of steps that used one wall or none
+    single_wall::Float64      # fraction of scans that used one wall or none
+    min_gap::Float64          # [m]
     wall_time::Float64
 end
 
-default_stanley() = Stanley(k=6.0, k_soft=1.0, k_yaw=0.05, max_steer=VehicleParams().s_max)
+"""
+    wall_gap(map::F1Tenth.MapData, x, y, θ, length, width) -> d
 
-function run_map(map_name; speed=5.0, laps=1, pose=nothing, map_ext=".png", render=false,
-                 stanley=default_stanley(), perception=PerceptionConfig(), smoothing=FilterConfig(),
-                 max_time=600.0)
-    params = VehicleParams()
+About how far the car's body (`length` × `width`, centered at `(x, y)`,
+heading `θ`) is from the nearest wall [m]: the map's distance to a wall,
+least over the body's corners and the midpoints of its sides (to within a
+map cell).
+"""
+function wall_gap(m::F1Tenth.MapData, x, y, θ, length, width)
+    so, co = sincos(m.origin[3])
+    s, c = sincos(θ)
+    h, w = size(m.dt)
+    gap = Inf
+    for (u, v) in ((1, 1), (1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1))
+        px = x + u * length / 2 * c - v * width / 2 * s - m.origin[1]
+        py = y + u * length / 2 * s + v * width / 2 * c - m.origin[2]
+        col = floor(Int, (px * co + py * so) / m.resolution)
+        row = floor(Int, (-px * so + py * co) / m.resolution)
+        (0 <= col < w && 0 <= row < h) || continue
+        gap = min(gap, m.dt[row+1, col+1])
+    end
+    return gap
+end
+
+"""
+    run_map(map_name; speed, laps, pose, map_ext, render, stanley, perception, smoothing, max_time) -> RunResult
+
+Drive `laps` laps (or until a crash or `max_time` seconds) with a
+[`LaneKeeper`](@ref); `speed` caps the speed, `stanley`, `perception` and
+`smoothing` replace its defaults, and `seed` seeds the LiDAR noise.
+"""
+function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", render=false,
+                 stanley=nothing, perception=nothing, smoothing=default_smoothing(), max_time=600.0, seed=12345)
     path = centerline(map_name)
     if pose === nothing
         path === nothing && error("$map_name is not a racetrack; give a start pose with --pose X Y THETA")
         pose = (path.x[1], path.y[1], path.heading[1])
     end
     dt = 0.01
-    env = F110Env(map=map_name, map_ext=map_ext, num_agents=1, timestep=dt, integrator=Integrator.RK4)
-    # Stanley measures the errors at the front axle: lf ahead of the center of
-    # gravity, where the LiDAR is lidar_dist ahead, and lf + lr ahead of the rear axle.
-    perceive = LanePerception(1080, 4.7, params.lf - env.lidar_dist; cfg=perception)
-    tracker = LaneFilter(params.lf + params.lr; cfg=smoothing)
-    speed_cfg = SpeedConfig(cruise=speed)
+    env = F110Env(; map=map_name, map_ext, num_agents=1, timestep=dt, integrator=Integrator.RK4, seed)
+    walls = env.sim.scan_simulator.map
+    params = env.params
+    keeper = LaneKeeper(params, env.sim.agents[1].lidar.scan_angles, env.lidar_dist;
+        stanley=something(stanley, default_stanley(params)), perception=something(perception, default_perception(params)),
+        smoothing, v_max=something(speed, params.speed_cmd_max))
+    perceive = keeper.perceive
 
     render && add_render_callback!(env, e -> render_callback(e, env, perceive))
     obs, _, _, _ = reset!(env, [pose[1] pose[2] pose[3]])
     render && render!(env)
 
-    t, dist, steps, single = 0.0, 0.0, 0, 0
+    t, dist, steps, scans, single, min_gap = 0.0, 0.0, 0, 0, 0, Inf
     sum_off, max_off, sum_e2, sum_ψ2 = 0.0, 0.0, 0.0, 0.0
     hint = 0
+    last_scan, steer, v_cmd = -Inf, 0.0, 0.0
     start = time()
     # The env reports `done` after 2 laps (as in Python), so stop on our own
     # lap count, or on a crash.
     while obs.collisions[1] == 0 && obs.lap_counts[1] < laps && t < max_time
         x, y, θ = obs.poses_x[1], obs.poses_y[1], obs.poses_theta[1]
         v, r = obs.linear_vels_x[1], obs.ang_vels_z[1]
+        min_gap = min(min_gap, wall_gap(walls, x, y, θ, params.length, params.width))
 
-        lane = track!(tracker, estimate_lane!(perceive, obs.scans[1]), v, r, dt)
-        steer = steering_angle(stanley, lane.e, lane.ψe, v; yaw_rate=r, path_yaw_rate=lane.κ * v)
-        obs, step_time, _, _ = step!(env, [steer target_speed(speed_cfg, lane)])
+        truth = path === nothing ? nothing : tracking_error(path, x, y, θ; hint, window=hint == 0 ? 0 : 30)
+        truth === nothing || (hint = truth.segment)
+        # The LiDAR publishes a scan every 1/scan_rate seconds and holds it in
+        # between. As on the real car, the controller runs once per new scan
+        # and its command is held until the next.
+        if obs.scan_times[1] != last_scan
+            scan_dt = isfinite(last_scan) ? obs.scan_times[1] - last_scan : 1 / params.scan_rate
+            last_scan = obs.scan_times[1]
+            steer, v_cmd, lane = control!(keeper, obs.scans[1], v, r, scan_dt)
+            scans += 1
+            lane.walls === :both || (single += 1)
+            if truth !== nothing && length(perceive.center_x) >= 3
+                # the lane center in this scan against the true one, at the front axle
+                seen = tracking_error(Path(perceive.center_x, perceive.center_y), perceive.x_ref, 0.0, 0.0)
+                fa = tracking_error(path, front_axle(x, y, θ, params.lf)..., θ; hint, window=30)
+                sum_e2 += (seen.e - fa.e)^2
+                sum_ψ2 += wrap_angle(seen.ψe - fa.ψe)^2
+            end
+        end
+        obs, step_time, _, _ = step!(env, [steer v_cmd])
         render && render!(env; mode=:human_fast)
 
         t += step_time
         steps += 1
         dist += abs(v) * step_time
-        lane.walls === :both || (single += 1)
-        if path !== nothing   # score against the true centerline
-            truth = tracking_error(path, x, y, θ; hint, window=hint == 0 ? 0 : 30)
-            hint = truth.segment
+        if truth !== nothing   # score against the true centerline
             sum_off += abs(truth.e)
             max_off = max(max_off, abs(truth.e))
-            fa = tracking_error(path, front_axle(x, y, θ, params.lf)..., θ; hint, window=30)
-            sum_e2 += (lane.e - fa.e)^2
-            sum_ψ2 += wrap_angle(lane.ψe - fa.ψe)^2
         end
     end
     crashed = obs.collisions[1] > 0
-    n = max(steps, 1)
+    n, ns = max(steps, 1), max(scans, 1)
     known(x) = path === nothing ? NaN : x
     return RunResult(basename(string(map_name)), obs.lap_counts[1] >= laps && !crashed, crashed, t,
-        known(sum_off / n), known(max_off), dist / max(t, eps()), known(sqrt(sum_e2 / n)),
-        known(sqrt(sum_ψ2 / n)), single / n, time() - start)
+        known(sum_off / n), known(max_off), dist / max(t, eps()), known(sqrt(sum_e2 / ns)),
+        known(sqrt(sum_ψ2 / ns)), single / ns, min_gap, time() - start)
 end
 
 function print_header()
-    @printf("%-14s %-8s %8s %7s %9s %9s %9s %8s %9s %7s\n", "map", "result", "time[s]", "v[m/s]",
-        "|off|[m]", "max|off|", "e_err[m]", "ψe_err°", "1-wall[%]", "wall[s]")
+    @printf("%-14s %-8s %8s %7s %9s %9s %7s %9s %8s %9s %7s\n", "map", "result", "time[s]", "v[m/s]",
+        "|off|[m]", "max|off|", "gap[m]", "e_err[m]", "ψe_err°", "1-wall[%]", "wall[s]")
 end
 
 function print_result(r::RunResult)
     status = r.finished ? "lap" : r.crashed ? "CRASH" : "timeout"
-    @printf("%-14s %-8s %8.2f %7.2f %9.3f %9.3f %9.3f %8.2f %9.1f %7.1f\n", r.map, status, r.sim_time,
-        r.mean_speed, r.mean_offset, r.max_offset, r.e_rmse, rad2deg(r.ψe_rmse), 100r.single_wall, r.wall_time)
+    @printf("%-14s %-8s %8.2f %7.2f %9.3f %9.3f %7.2f %9.3f %8.2f %9.1f %7.1f\n", r.map, status, r.sim_time,
+        r.mean_speed, r.mean_offset, r.max_offset, r.min_gap, r.e_rmse, rad2deg(r.ψe_rmse), 100r.single_wall,
+        r.wall_time)
 end
 
 # ---------------------------------------------------------------------------
@@ -193,11 +334,12 @@ function render_callback(e, env, perceive)
     e.score_label.y = top - 700
     e.left, e.right, e.top, e.bottom = left - 800, right + 800, top + 800, bottom - 800
 
-    # the lane center the LiDAR sees, in orange (renderer units are 50 × meters)
+    # the line the car follows, in orange
     st = env.sim.agents[1].state
     θ = st[5]
     ox, oy = front_axle(st[1], st[2], θ, env.lidar_dist)   # scan origin
-    pts = GL.Point2f[GL.Point2f(50 * (ox + x * cos(θ) - y * sin(θ)), 50 * (oy + x * sin(θ) + y * cos(θ)))
+    k = F1Tenth.RENDER_SCALE   # renderer units per meter
+    pts = GL.Point2f[GL.Point2f(k * (ox + x * cos(θ) - y * sin(θ)), k * (oy + x * sin(θ) + y * cos(θ)))
            for (x, y) in zip(perceive.cx, perceive.cy)]
     if _drawn[] === nothing
         _drawn[] = GL.Observable(pts)
@@ -212,7 +354,7 @@ end
 
 function parse_args(args)
     isempty(args) && (print(USAGE); exit(1))
-    opts = Dict{Symbol,Any}(:map => args[1], :speed => 5.0, :laps => 1, :pose => nothing,
+    opts = Dict{Symbol,Any}(:map => args[1], :speed => nothing, :laps => 1, :pose => nothing,
         :map_ext => ".png", :render => false)
     i = 2
     while i <= length(args)
