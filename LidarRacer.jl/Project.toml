@@ -6,6 +6,7 @@ authors = ["Prateek Ganguli <prateek.ganguli@gmail.com>"]
 [deps]
 LidarLaneEstimation = "df66ebbf-4f73-4268-99b2-bc89cfec981b"
 MinimumCurvaturePlanner = "267b4fd1-97d5-44e8-be58-380e88c1ca66"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 StanleyController = "6c722594-8a4a-4272-af8d-909386d35611"
 VelocityProfilePlanner = "e0ccf83b-6183-451d-b977-c2d11878aa67"
 
@@ -18,6 +19,7 @@ VelocityProfilePlanner = {path = "../VelocityProfilePlanner.jl"}
 [compat]
 LidarLaneEstimation = "0.1"
 MinimumCurvaturePlanner = "0.1"
+PrecompileTools = "1"
 StanleyController = "0.1"
 VelocityProfilePlanner = "0.1"
 Test = "1"

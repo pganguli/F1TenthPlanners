@@ -25,6 +25,7 @@ module LidarRacer
 
 using LidarLaneEstimation
 using MinimumCurvaturePlanner
+using PrecompileTools
 using StanleyController
 using VelocityProfilePlanner
 
@@ -248,5 +249,7 @@ function control!(r::Racer, ranges, v, yaw_rate, dt)
     steer = steering_angle(r.stanley, lane.e, lane.ψe, v; yaw_rate, path_yaw_rate=lane.κ * v)
     return steer, speed_command(r.speed, lane, free_distance(r, lane, v, yaw_rate), v, yaw_rate), lane
 end
+
+include("precompile.jl")
 
 end # module
