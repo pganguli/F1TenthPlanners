@@ -212,9 +212,9 @@ end
 const RENDER_FPS = 60
 # Pixels rendered per window unit. GLMakie defaults to the display's scale
 # (3 on a high-DPI display: 9 times the pixels, about 18 ms a frame, too slow
-# for 60 frames a second); 1 is about 6 ms, upscaled, so a little blurry. 2 is
-# sharper at about 10 ms.
-const RENDER_PX_PER_UNIT = 1.0
+# for 60 frames a second). 2 is about 10 ms a frame; 1 is about 6 ms but
+# visibly blurry.
+const RENDER_PX_PER_UNIT = 2.0
 
 const _drawn = Ref{Any}(nothing)
 
