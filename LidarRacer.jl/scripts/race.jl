@@ -36,7 +36,7 @@ options:
   --laps N         laps to drive (default 1)
   --pose X Y THETA start pose; required for maps that are not racetracks
   --map-ext EXT    image extension of a custom map (default .png)
-  --render         open the render window (needs a display)
+  --render         watch it in real time in a window (needs a display)
 """
 
 """
@@ -108,7 +108,8 @@ Drive `laps` laps (or until a crash or `max_time` seconds) with a
 [`Racer`](@ref); `speed` caps the speed, and any other keywords (`stanley`,
 `perception`, `smoothing`, `margin`, `latency`) replace the Racer's defaults.
 `timestep` is the simulator's step [s] (it also sets how precisely a
-command's latency is timed), and `seed` seeds the LiDAR noise.
+command's latency is timed), and `seed` seeds the LiDAR noise. With `render`,
+the run is drawn at `RENDER_FPS` and paced to real time.
 """
 function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", render=false,
                  timestep=0.0025, max_time=600.0, seed=12345, racer...)
@@ -135,6 +136,7 @@ function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", 
     last_scan, steer, v_cmd = -Inf, 0.0, 0.0
     # commands on their way, oldest first: (time it takes effect, steer, speed)
     pending = Tuple{Float64,Float64,Float64}[]
+    next_frame = 1 / RENDER_FPS   # sim time of the next frame drawn
     start = time()
     # The env reports `done` after 2 laps (as in Python), so stop on our own
     # lap count, or on a crash.
@@ -168,7 +170,12 @@ function run_map(map_name; speed=nothing, laps=1, pose=nothing, map_ext=".png", 
             _, steer, v_cmd = popfirst!(pending)
         end
         obs, step_time, _, _ = step!(env, [steer v_cmd])
-        render && render!(env; mode=:human_fast)
+        # draw at the display's rate, not the simulator's (400 steps a
+        # second), each frame waiting for the wall clock to catch up
+        if render && env.current_time >= next_frame - 1e-9
+            render!(env; mode=:human)
+            next_frame += 1 / RENDER_FPS
+        end
 
         t += step_time
         steps += 1
@@ -200,6 +207,14 @@ end
 
 # ---------------------------------------------------------------------------
 # Rendering (only with --render; GLMakie is loaded on demand)
+
+# Frames per second of sim time; with real-time pacing, also of wall time.
+const RENDER_FPS = 60
+# Pixels rendered per window unit. GLMakie defaults to the display's scale
+# (3 on a high-DPI display: 9 times the pixels, about 18 ms a frame, too slow
+# for 60 frames a second); 1 is about 6 ms, upscaled, so a little blurry. 2 is
+# sharper at about 10 ms.
+const RENDER_PX_PER_UNIT = 1.0
 
 const _drawn = Ref{Any}(nothing)
 
@@ -268,7 +283,10 @@ function main(args=ARGS)
         print_header()
         foreach(print_result, results)
     else
-        o[:render] && @eval Main using GLMakie
+        if o[:render]
+            @eval Main using GLMakie
+            @eval Main GLMakie.activate!(px_per_unit=$RENDER_PX_PER_UNIT)
+        end
         r = Base.invokelatest(run_map, o[:map]; speed=o[:speed], laps=o[:laps], pose=o[:pose],
             map_ext=o[:map_ext], render=o[:render])
         print_header()
