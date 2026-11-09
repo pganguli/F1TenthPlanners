@@ -1,0 +1,25 @@
+[deps]
+F1Tenth = "ec9dc3f2-e932-4b18-a493-a4686694dcbe"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+LidarLaneEstimation = "df66ebbf-4f73-4268-99b2-bc89cfec981b"
+LidarLaneNets = "5dc702fd-b87c-461f-9115-a9161d1c12ca"
+LidarRacer = "e7940826-cef1-434a-86be-118e8a8d05da"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Lux = "b2108857-7c20-44ae-9111-449ecde12c47"
+MinimumCurvaturePlanner = "267b4fd1-97d5-44e8-be58-380e88c1ca66"
+Optimisers = "3bd65402-5787-11e9-1adc-39752487f4e2"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+StanleyController = "6c722594-8a4a-4272-af8d-909386d35611"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+VelocityProfilePlanner = "e0ccf83b-6183-451d-b977-c2d11878aa67"
+Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
+
+[sources]
+F1Tenth = {rev = "main", url = "https://github.com/pganguli/F1Tenth.jl"}
+LidarLaneEstimation = {path = "../../LidarLaneEstimation.jl"}
+LidarLaneNets = {path = ".."}
+LidarRacer = {path = "../../LidarRacer.jl"}
+MinimumCurvaturePlanner = {path = "../../MinimumCurvaturePlanner.jl"}
+StanleyController = {path = "../../StanleyController.jl"}
+VelocityProfilePlanner = {path = "../../VelocityProfilePlanner.jl"}

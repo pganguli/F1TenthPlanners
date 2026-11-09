@@ -1,0 +1,2 @@
+# Trained network weights (LidarLaneNets.jl) are stored with Git LFS.
+LidarLaneNets.jl/weights/*.jld2 filter=lfs diff=lfs merge=lfs -text
