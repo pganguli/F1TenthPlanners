@@ -45,11 +45,6 @@ err = tracking_error(path, front_axle(x, y, θ, lf)..., θ)   # e, ψe, κ, s, s
 segment) and `window` to search near it only. Past the ends of an open path,
 the end segments are extended.
 
-## Used by
-
-[LidarRacer.jl](../LidarRacer.jl) uses this law to steer an F1Tenth.jl car
-around racetracks using only its LiDAR.
-
 ## Tests
 
 ```sh
