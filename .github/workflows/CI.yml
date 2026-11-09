@@ -24,6 +24,7 @@ jobs:
       matrix:
         package:
           - LidarLaneEstimation.jl
+          - LidarLaneNets.jl
           - LidarRacer.jl
           - MinimumCurvaturePlanner.jl
           - StanleyController.jl
