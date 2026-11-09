@@ -4,9 +4,9 @@
 """
     TIERS
 
-`:small` runs on the car: every 4th beam, three thin convolutions. `:large`
-runs in the cloud: every beam, four wider convolutions and a wider head
-(with dropout in training).
+`:small` runs on the car: every 4th beam, three thin convolutions (each
+output sees about 29° of the scan). `:large` runs in the cloud: every beam,
+six wider convolutions (each output sees about 63°) and a wider head.
 """
 const TIERS = (:small, :large)
 
@@ -56,10 +56,13 @@ function build_model(tier::Symbol, n_in::Integer, n_out::Integer)
         return Chain(_halve(5, 1 => 8), _halve(5, 8 => 16), _halve(5, 16 => 16), FlattenLayer(),
             Dense(16L => 64, relu), Dense(64 => 2n_out))
     elseif tier === :large
-        L = cld(cld(cld(cld(n_in, 2), 2), 2), 2)
-        return Chain(_halve(7, 1 => 16), _halve(5, 16 => 32), _halve(5, 32 => 64), _halve(3, 64 => 64),
-            FlattenLayer(), Dense(64L => 256, relu), Dropout(0.2), Dense(256 => 128, relu), Dropout(0.2),
-            Dense(128 => 2n_out))
+        L = n_in
+        for _ in 1:6
+            L = cld(L, 2)
+        end
+        return Chain(_halve(5, 1 => 16), _halve(5, 16 => 32), _halve(5, 32 => 32), _halve(5, 32 => 64),
+            _halve(5, 64 => 64), _halve(5, 64 => 128), FlattenLayer(), Dense(128L => 256, relu),
+            Dense(256 => 128, relu), Dense(128 => 2n_out))
     end
     throw(ArgumentError("unknown tier $tier"))
 end

@@ -36,10 +36,10 @@ car's frame (x forward, y left, angles counterclockwise):
 by 10), each giving a mean and a standard deviation for every number of its
 estimate.
 
-| Tier | Input | Layers | Parameters | Inference, one scan (CPU) |
-|---|---|---|---|---|
-| small | every 4th beam (271) | 3 convolutions (8, 16, 16 channels), dense 64 | 37–45 k | ~0.12 ms |
-| large | every beam (1081) | 4 convolutions (16, 32, 64, 64), dense 256, 128 | 1.17–1.19 M | ~0.5 ms |
+| Tier | Input | Layers (stride-2 convolutions, kernel 5) | Each output sees | Parameters | Inference, one scan (CPU) |
+|---|---|---|---|---|---|
+| small | every 4th beam (271) | 3 convolutions (8, 16, 16 channels), dense 64 | ~29° of the scan | 37–45 k | ~0.12 ms |
+| large | every beam (1081) | 6 convolutions (16, 32, 32, 64, 64, 128), dense 256, 128 | ~63° | 670–687 k | ~0.85 ms |
 
 ## Use
 
@@ -117,8 +117,15 @@ julia -t auto --project=. evaluate.jl     # results/accuracy.md: on the held-out
 - **Split**: 16 tracks to train on, 2 to choose the epoch (Hockenheim,
   Sepang), 5 never seen (Spa, Monza, Silverstone, Oschersleben, YasMarina).
 - **Loss** ([`train.jl`](train/train.jl)): the β-negative log-likelihood of
-  a Gaussian (β = 0.5), on targets normalized per output; Adam, cosine
-  decay; the epoch with the least validation error is kept.
+  a Gaussian (β = 0.5), on targets normalized per output; Adam (AdamW with
+  weight decay 1e-4 for the large networks), learning rate 1e-3 with cosine
+  decay, 40 epochs (small) or 30 (large); the epoch with the least
+  validation error is kept. Half of each batch is mirrored left to right
+  (the LiDAR is symmetric), which doubles the data.
+- **What didn't work** for the large networks: four convolutions into a
+  4352-wide dense layer (each output saw only ~12° of the scan; it fit no
+  better than the small network), dropout (about 6× worse on the training data
+  itself), batch normalization (2.4× slower per epoch on a CPU).
 - **GPU**: if `LuxCUDA` (NVIDIA), `AMDGPU` or `Metal` is added to the train
   environment, `train.jl` loads it and trains there; otherwise on the CPU
   (here, a 6-core laptop: about 1 h for all 12).

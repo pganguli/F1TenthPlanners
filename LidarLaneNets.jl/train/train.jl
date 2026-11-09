@@ -46,7 +46,8 @@ end
 
 const EPOCHS = (small=parse(Int, get(ENV, "EPOCHS_SMALL", "40")), large=parse(Int, get(ENV, "EPOCHS_LARGE", "30")))
 const BATCH = 256
-const LR = (small=1e-3, large=5e-4)
+const LR = (small=1e-3, large=1e-3)
+const WEIGHT_DECAY = 1e-4
 const β = 0.5f0
 
 """
@@ -122,7 +123,9 @@ function train_one(est, tier, Ftr, Ytr, Fva, Yva; dev, epochs, rng=Xoshiro(42))
     lr = LR[tier]
     net = EstimatorNet(est, tier, size(Ftr, 1) == input_size(tier, 1081) ? 1081 : error("beams?");
         rng, y_mean, y_std)
-    ts = Training.TrainState(net.model, dev(net.ps), dev(net.st), Adam(lr))
+    # the large networks with weight decay (they can overfit 16 tracks)
+    opt = tier === :large ? AdamW(lr, (0.9, 0.999), WEIGHT_DECAY) : Adam(lr)
+    ts = Training.TrainState(net.model, dev(net.ps), dev(net.st), opt)
     best, best_ps, best_epoch = Inf, nothing, 0
     N = size(Ftr, 2)
     steps = epochs * cld(N, BATCH)
