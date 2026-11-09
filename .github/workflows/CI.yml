@@ -1,0 +1,52 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  # Skip intermediate builds: always.
+  # Cancel intermediate builds: only if it is a pull request build.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+jobs:
+  test:
+    name: ${{ matrix.package }} - Julia ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions: # needed to allow julia-actions/cache to proactively delete old caches that it has created
+      actions: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - LidarLaneEstimation.jl
+          - LidarRacer.jl
+          - MinimumCurvaturePlanner.jl
+          - StanleyController.jl
+          - VelocityProfilePlanner.jl
+        version:
+          - '1.10'
+          - '1.13'
+          - 'pre'
+        exclude:
+          - package: LidarRacer.jl # its [sources] need Julia 1.11
+            version: '1.10'
+        include:
+          - package: LidarRacer.jl
+            version: '1.11'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+        with:
+          project: ${{ matrix.package }}
+      - uses: julia-actions/julia-runtest@v1
+        with:
+          project: ${{ matrix.package }}

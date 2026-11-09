@@ -1,5 +1,7 @@
 # F1TenthPlanners
 
+[![CI](https://github.com/pganguli/F1TenthPlanners/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/pganguli/F1TenthPlanners/actions/workflows/CI.yml?query=branch%3Amain)
+
 Julia packages for racing an F1TENTH car with only its LiDAR. Each folder is
 its own package.
 
