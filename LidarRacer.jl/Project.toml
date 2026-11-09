@@ -4,29 +4,31 @@ version = "0.1.0"
 authors = ["Prateek Ganguli <prateek.ganguli@gmail.com>"]
 
 [deps]
-LidarLaneEstimation = "df66ebbf-4f73-4268-99b2-bc89cfec981b"
+LidarLaneNets = "5dc702fd-b87c-461f-9115-a9161d1c12ca"
 MinimumCurvaturePlanner = "267b4fd1-97d5-44e8-be58-380e88c1ca66"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 StanleyController = "6c722594-8a4a-4272-af8d-909386d35611"
 VelocityProfilePlanner = "e0ccf83b-6183-451d-b977-c2d11878aa67"
 
 [sources]
-LidarLaneEstimation = {path = "../LidarLaneEstimation.jl"}
+LidarLaneNets = {path = "../LidarLaneNets.jl"}
 MinimumCurvaturePlanner = {path = "../MinimumCurvaturePlanner.jl"}
 StanleyController = {path = "../StanleyController.jl"}
 VelocityProfilePlanner = {path = "../VelocityProfilePlanner.jl"}
 
 [compat]
-LidarLaneEstimation = "0.1"
+LidarLaneNets = "0.1"
 MinimumCurvaturePlanner = "0.1"
 PrecompileTools = "1"
+Random = "1"
 StanleyController = "0.1"
 VelocityProfilePlanner = "0.1"
 Test = "1"
 julia = "1.11"
 
 [extras]
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test"]
+test = ["Random", "Test"]

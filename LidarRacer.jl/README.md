@@ -7,23 +7,26 @@ as fast as it can still slow down in time for what it sees. The line is a
 local raceline, re-planned on every scan as far ahead as the LiDAR sees. It
 is not a global raceline computed ahead of time from a map.
 
-The controller only combines the work of four sibling packages:
+On this branch (`dnn-estimators`) the lane is estimated by neural networks
+instead of the hand-written LidarLaneEstimation.jl: a small network per
+estimate on the car at every scan, and a large one "in the cloud" when a
+schedule calls it. The controller combines the work of four sibling
+packages:
 
 | Step | Package |
 |---|---|
-| finds the lane and the room around its center | [LidarLaneEstimation.jl](../LidarLaneEstimation.jl) |
-| plans the line through it that bends least | [MinimumCurvaturePlanner.jl](../MinimumCurvaturePlanner.jl) |
-| measures the car against that line and smooths the result with an unscented Kalman filter, giving `e`, `ψe` and the curvature at the front axle | [LidarLaneEstimation.jl](../LidarLaneEstimation.jl) |
-| turns `e` and `ψe` into a steering command | [StanleyController.jl](../StanleyController.jl) |
+| estimates the lane relative to its center (cross-track and heading error at the front axle, the curvature and free room on each side ahead, how far ahead it is seen, the free distance along a fan of arcs), and combines the estimates over time with a Kalman filter | [LidarLaneNets.jl](../LidarLaneNets.jl) |
+| plans the line that bends least through the lane rebuilt from those estimates | [MinimumCurvaturePlanner.jl](../MinimumCurvaturePlanner.jl) |
+| measures the car against that line and turns the errors into a steering command | [StanleyController.jl](../StanleyController.jl) |
 | sets the speed | [VelocityProfilePlanner.jl](../VelocityProfilePlanner.jl) |
 
 It doesn't depend on a simulator. The simulator only comes in through the
-script in [scripts/](scripts/).
+scripts in [scripts/](scripts/).
 
 ## Use
 
 ```julia
-using LidarRacer
+using LidarLaneNets, LidarRacer
 
 # the car and its LiDAR; CarParams(p) also reads these from any object that
 # has them, such as F1Tenth.jl's VehicleParams
@@ -31,17 +34,39 @@ car = CarParams(lf=0.130, lr=0.127, width=0.228, s_max=0.4189,
     steer_cmd_min=-0.327, steer_cmd_max=0.292, speed_cmd_max=14.375,
     decel_cmd=2.5, scan_rate=40.0, scan_range=10.0)
 
-# beam angles [rad], and how far the LiDAR sits ahead of the center of gravity [m]
-racer = Racer(car, range(-3π / 4, 3π / 4; length=1081), 0.143)
+# beam angles [rad], how far the LiDAR sits ahead of the center of gravity [m],
+# the networks, and when to call the cloud
+nets = load_nets("../LidarLaneNets.jl/weights")
+racer = Racer(car, range(-3π / 4, 3π / 4; length=1081), 0.143, nets; schedule=RoundRobin())
 
 # on each new scan: measured speed and yaw rate, time since the last scan
 steer, speed, lane = control!(racer, ranges, v, yaw_rate, dt)
 ```
 
-`Racer` takes `stanley`, `perception`, `smoothing`, `margin`, `latency` and
-`v_max` keywords to replace its defaults (see `src/LidarRacer.jl`).
-`racer.path_x` and `racer.path_y` hold the last line planned, in the LiDAR's
-frame.
+`Racer` also takes `selector` and `tracking` (LidarLaneNets.jl's
+`SelectorConfig` and `TrackerConfig`: the simulated network, which results
+to use, the filter's tuning), and `stanley`, `margin`, `k_σ`, `latency` and
+`v_max` to replace its defaults (see `src/LidarRacer.jl`). `racer.plan`
+holds the last line planned, in the front axle's frame, and `racer.lane` the
+last lane state. When the lane is lost (no cross-track or heading error for
+10 scans), the car brakes to a stop and holds its steering.
+
+[`drive`](src/LidarRacer.jl) does everything after the estimates from any
+`LaneState`: the true one in a simulator, say (LidarLaneNets.jl's training
+data is collected that way).
+
+### From the estimates to a command
+
+1. **The lane, rebuilt**: its center starts `e` to the side of the front
+   axle, in direction `ψe`, and bends by `κ_profile`, every 0.25 m out to
+   `sight`; the room to each side is `w_left` and `w_right`, less `margin`.
+2. **The line**: the minimum-curvature path through that room.
+3. **Steering**: the car measured against the line (Stanley's `e`, `ψe` and
+   the line's curvature), through the Stanley law.
+4. **Speed**: as below, along the line's curvature out to `sight`, and the
+   `clearance` ahead along the arc the car turns on or along the line. Both
+   `sight` and `clearance` are taken `k_σ` standard deviations short of
+   their estimates.
 
 ## Racing F1Tenth.jl maps
 

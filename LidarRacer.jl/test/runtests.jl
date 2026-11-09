@@ -1,4 +1,6 @@
+using LidarLaneNets
 using LidarRacer
+using Random
 using Test
 
 # NUC5, as in F1Tenth.jl's defaults
@@ -7,43 +9,20 @@ const CAR = (lf=0.130, lr=0.127, width=0.228, s_max=0.4189, steer_cmd_min=-0.327
     mass=3.9)                                       # an extra field, ignored
 const BEAMS = range(-3π / 4, 3π / 4; length=1081)  # a Hokuyo UST-10LX
 const LIDAR_DIST = 0.143                            # LiDAR ahead of the center of gravity
-const MAX_RANGE = 65.533                            # what the UST-10LX reads past its range
+const NP = length(PROFILE_S)
+const NK = length(CLEARANCE_K)
 
-# A scan from the origin, looking along +x, of walls given as polylines;
-# returns past the LiDAR's range read MAX_RANGE.
-function scan(walls)
-    map(BEAMS) do a
-        dx, dy = cos(a), sin(a)
-        best = Inf
-        for w in walls, k in 1:length(w)-1
-            (px, py), (qx, qy) = w[k], w[k+1]
-            ex, ey = qx - px, qy - py
-            den = dx * ey - dy * ex
-            abs(den) < 1e-12 && continue
-            t = (px * ey - py * ex) / den        # distance along the ray
-            u = (px * dy - py * dx) / den        # position along the wall
-            (t > 0 && 0 <= u <= 1) && (best = min(best, t))
-        end
-        best <= CAR.scan_range ? best : MAX_RANGE
-    end
-end
+# A lane 2 m wide, its center `e` to the left of the front axle, at `ψe`,
+# bending by κ, seen `sight` meters ahead, `free` meters clear on every arc.
+lane(; e=0.0, ψe=0.0, κ=0.0, sight=SIGHT_MAX, free=CLEARANCE_MAX) =
+    LaneState(lane_labels(; e, ψe, κ_profile=fill(κ, NP), w_left=fill(1.0, NP), w_right=fill(1.0, NP), sight,
+        clearance=fill(free, NK)))
 
-# a straight lane 2 m wide whose center passes `offset` to the left, `length` long
-straight(offset=0.0; length=40.0) = [[(-10.0, offset + 1), (length, offset + 1)], [(-10.0, offset - 1), (length, offset - 1)]]
-# a lane 2 m wide turning left on a circle of radius R (the car starts on it)
-function left_turn(R)
-    φ = range(-π / 2 - 0.5, π / 2; length=400)
-    return [[(r * cos(a), R + r * sin(a)) for a in φ] for r in (R - 1, R + 1)]
-end
+# untrained networks, for running the whole controller
+tier_nets(t) = NamedTuple{ESTIMATES}(Tuple(EstimatorNet(est, t, length(BEAMS); rng=Xoshiro(1)) for est in ESTIMATES))
+const NETS = (small=tier_nets(:small), large=tier_nets(:large))
 
-# drive `n` scans in place at speed v (the scene doesn't move; enough for the filter to settle)
-function settle(racer, ranges; v=3.0, n=10)
-    local out
-    for _ in 1:n
-        out = control!(racer, ranges, v, 0.0, 1 / CAR.scan_rate)
-    end
-    return out
-end
+planner(; kwargs...) = Planner(CarParams(CAR); sweep=0.75 / CAR.scan_rate, kwargs...)
 
 @testset "LidarRacer" begin
     @testset "CarParams" begin
@@ -51,7 +30,7 @@ end
         @test car isa CarParams
         @test car.lf == CAR.lf && car.scan_range == CAR.scan_range
         @test CarParams(car) == car
-        @test_throws ErrorException CarParams((lf=0.13,))
+        @test_throws Exception CarParams((lf=0.13,))
     end
 
     @testset "SpeedConfig from the car" begin
@@ -61,53 +40,91 @@ end
         @test cfg.r_min ≈ (CAR.lf + CAR.lr) / tan(CAR.steer_cmd_max)   # the smaller steering limit
         @test cfg.delay ≈ 0.01875 + 0.0075 + 1 / CAR.scan_rate
         @test SpeedConfig(CarParams(CAR); sweep=0.0, latency=0.0, v_max=4.0, a_lat=3.0).a_lat == 3.0
+        @test planner(a_lat=3.0).speed.a_lat == 3.0
     end
 
     @testset "Racer timing" begin
-        r = Racer(CAR, BEAMS, LIDAR_DIST)
+        r = Racer(CAR, BEAMS, LIDAR_DIST, NETS)
         @test r.sweep ≈ 0.75 / CAR.scan_rate   # 270° of a 360° sweep
         @test r.latency == 0.0075
-        @test r.speed.v_max == CAR.speed_cmd_max
-        @test Racer(CAR, BEAMS, LIDAR_DIST; v_max=3.0, latency=0.02).speed.v_max == 3.0
+        @test r.planner.speed.v_max == CAR.speed_cmd_max
+        @test Racer(CAR, BEAMS, LIDAR_DIST, NETS; v_max=3.0, latency=0.02).planner.speed.v_max == 3.0
+    end
+
+    @testset "lane center from the estimates" begin
+        x, y, h, wl, wr = lane_center(lane(e=0.2), 4.0)
+        @test x[2] ≈ 0 && y[2] ≈ 0.2          # beside the front axle, to the left
+        @test x[1] ≈ -0.5 && all(≈(0.2), y)   # half a meter behind, then straight on
+        @test x[end] ≈ 4.0 && length(x) == 2 + 16
+        @test all(==(1.0), wl) && all(==(1.0), wr)
+        x, y, h, _, _ = lane_center(lane(κ=0.5), 3.0)
+        @test h[end] ≈ 0.5 * 3.0                 # turned by κ times the length
+        @test hypot(x[end], y[end] - 2) ≈ 2 atol = 1e-3   # on the circle of radius 2
+        # stops at the first unknown point
+        s = lane()
+        s.κ_profile[6] = NaN
+        @test length(lane_center(s, 8.0)[1]) == 2 + 4
     end
 
     @testset "straight lane, centered" begin
-        r = Racer(CAR, BEAMS, LIDAR_DIST)
-        steer, speed, lane = settle(r, scan(straight()))
-        @test lane.walls === :both
+        steer, speed, plan = drive(planner(), lane(), 3.0, 0.0)
         @test abs(steer) < 0.02
-        @test abs(lane.e) < 0.05
-        @test r.speed.v_min < speed <= r.speed.v_max
-        @test maximum(abs, r.path_y) < 0.1   # the planned line stays in the middle
+        @test abs(plan.e) < 0.02 && abs(plan.ψe) < 0.02
+        @test maximum(abs, plan.y) < 0.05   # the planned line stays in the middle
+        @test 1.0 < speed <= CAR.speed_cmd_max
+        @test isinf(plan.free)
     end
 
     @testset "steers back to the line" begin
-        steer_l, _, lane_l = settle(Racer(CAR, BEAMS, LIDAR_DIST), scan(straight(0.4)))
-        steer_r, _, lane_r = settle(Racer(CAR, BEAMS, LIDAR_DIST), scan(straight(-0.4)))
-        @test lane_l.e > 0 && steer_l > 0    # line to the left: steer left
-        @test lane_r.e < 0 && steer_r < 0
+        steer_l, _, plan_l = drive(planner(), lane(e=0.3), 3.0, 0.0)
+        steer_r, _, plan_r = drive(planner(), lane(e=-0.3), 3.0, 0.0)
+        @test plan_l.e > 0 && steer_l > 0    # line to the left: steer left
+        @test plan_r.e < 0 && steer_r < 0
+        steer, _, _ = drive(planner(), lane(ψe=0.2), 3.0, 0.0)
+        @test steer > 0                      # line pointing left: steer left
     end
 
-    @testset "slower in a turn, and for a wall ahead" begin
-        _, v_straight, _ = settle(Racer(CAR, BEAMS, LIDAR_DIST), scan(straight()))
-        r = Racer(CAR, BEAMS, LIDAR_DIST)
-        steer, v_turn, lane = settle(r, scan(left_turn(3.0)))
-        @test steer > 0
-        @test lane.κ > 0
+    @testset "slower in a turn, for a wall ahead, and when unsure" begin
+        _, v_straight, _ = drive(planner(), lane(), 3.0, 0.0)
+        steer, v_turn, plan = drive(planner(), lane(κ=0.6), 3.0, 0.0)
+        @test steer > 0 && plan.κ > 0
         @test v_turn < v_straight
-        # turning with the lane, the outer wall straight ahead (about 2.5 m
-        # away) is not in the way
-        @test free_distance(r, lane, 3.0, 1.0) > 5.0
-        # not turning yet, the line still curves away from it
-        @test free_distance(r, lane, 3.0, 0.0) > LidarRacer.clearance(r.perceive) + 0.3
+        # the planned line bends less than the lane (it cuts the corner)
+        @test 0 < plan.κ < 0.6
 
-        walls = [straight(; length=2.0); [[(2.0, -1.0), (2.0, 1.0)]]]   # a dead end 2 m ahead
-        r = Racer(CAR, BEAMS, LIDAR_DIST)
-        _, v_wall, lane = settle(r, scan(walls))
-        # no faster than it can brake from, after the delay, to v_min `margin` short of the wall
-        cfg = r.speed
-        d = free_distance(r, lane, 3.0, 0.0) - cfg.margin - cfg.delay * 3.0
+        p = planner()
+        _, v_wall, plan = drive(p, lane(free=2.0), 3.0, 0.0)
+        cfg = p.speed
+        d = plan.free - cfg.margin - cfg.delay * 3.0
+        @test plan.free ≈ 2.0
         @test v_wall <= sqrt(cfg.v_min^2 + 2cfg.a_brake * d) + 1e-9
-        @test v_wall < v_turn
+        @test v_wall < v_straight
+
+        # sight is taken k_σ standard deviations short
+        unsure = lane(sight=6.0)
+        unsure = LaneState(unsure.e, unsure.ψe, unsure.κ, unsure.κ_profile, unsure.w_left, unsure.w_right, 6.0, 2.0,
+            unsure.clearance, unsure.σ_clearance, unsure.tiers, :ok)
+        _, v_sure, plan_sure = drive(p, lane(sight=6.0), 3.0, 0.0)
+        _, v_unsure, plan_unsure = drive(p, unsure, 3.0, 0.0)
+        @test plan_unsure.sight ≈ 4.0 && plan_sure.sight ≈ 6.0
+        @test v_unsure < v_sure
+    end
+
+    @testset "the whole controller" begin
+        ranges = [abs(sin(a)) < 1e-3 || 1 / abs(sin(a)) > 10 ? 65.533 : 1 / abs(sin(a)) for a in BEAMS]
+        trusting = (e=Inf, ψe=Inf, κ_profile=Inf, widths=Inf, sight=Inf, clearance=Inf)
+        r = Racer(CAR, BEAMS, LIDAR_DIST, NETS; selector=SelectorConfig(max_σ=trusting, agree=Inf))
+        local steer, speed, s
+        for _ in 1:5
+            steer, speed, s = control!(r, ranges, 3.0, 0.0, 0.025)
+        end
+        @test s.status === :ok && isfinite(steer) && speed >= 0
+        @test r.plan !== nothing
+        @test r.t ≈ 0.125
+        # nothing it trusts: the lane is never found, so it stops
+        never = (e=0.0, ψe=0.0, κ_profile=0.0, widths=0.0, sight=0.0, clearance=0.0)
+        r = Racer(CAR, BEAMS, LIDAR_DIST, NETS; selector=SelectorConfig(max_σ=never))
+        steer, speed, s = control!(r, ranges, 3.0, 0.0, 0.025)
+        @test s.status === :lost && speed == 0 && steer == 0
     end
 end
