@@ -109,7 +109,9 @@ julia -t auto --project=. evaluate.jl     # results/accuracy.md: on the held-out
 - **Labels** ([`truth.jl`](train/truth.jl)): the true value of every
   estimate, from the map and the track's centerline, at the LiDAR's pose at
   the middle of its sweep.
-- **Data** ([`collect.jl`](train/collect.jl)): per track, 2 drives of 60 s
+- **Data** ([`collect.jl`](train/collect.jl)): deterministic, so it is
+  regenerated (768 MB, about 15 s) rather than committed: each track has a
+  fixed seed, and the same code gives bit-identical files. Per track, 2 drives of 60 s
   on the true estimates with slowly wandering errors added and a random
   speed limit (so the car also drives off the ideal line; the scans carry
   the real motion distortion), plus 2500 scans standing at random places

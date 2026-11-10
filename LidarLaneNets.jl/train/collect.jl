@@ -10,6 +10,9 @@
 #
 #     julia -t auto --project=. collect.jl            # every track, into data/
 #     julia --project=. collect.jl Spa Monza          # some tracks
+#
+# The data is deterministic: the same code gives the same files (each track
+# has its own fixed seed), so it is regenerated rather than committed.
 
 include("truth.jl")
 using JLD2
@@ -164,8 +167,12 @@ function save_samples(path, S::Samples, name)
     jldsave(path; X, Y, v=S.v, r=S.r, static=S.static, track=name)
 end
 
+# A track's seed: its place among all racetracks, so a track's data is the
+# same however many tracks are collected at once.
+track_seed(name) = findfirst(==(name), sort!(collect(keys(F1Tenth.RACETRACKS))))
+
 # Per track: `runs` drives of `seconds` each, with random speed limits, plus `static` standing scans.
-function collect_track(name; runs=2, seconds=60.0, static=2500, seed=1)
+function collect_track(name; runs=2, seconds=60.0, static=2500, seed=track_seed(name), dir=DATA_DIR)
     S = Samples()
     crashes = 0
     for k in 1:runs
@@ -176,8 +183,8 @@ function collect_track(name; runs=2, seconds=60.0, static=2500, seed=1)
         crashes += c
     end
     add_static!(S, name, static; seed=seed + 7)
-    mkpath(DATA_DIR)
-    save_samples(joinpath(DATA_DIR, name * ".jld2"), S, name)
+    mkpath(dir)
+    save_samples(joinpath(dir, name * ".jld2"), S, name)
     @printf("%-14s %6d samples (%d driving), %d crashes\n", name, length(S.X), count(!, S.static), crashes)
     return length(S.X)
 end
@@ -185,6 +192,6 @@ end
 if abspath(PROGRAM_FILE) == @__FILE__
     names = isempty(ARGS) ? sort!(collect(keys(F1Tenth.RACETRACKS))) : ARGS
     Threads.@threads :dynamic for i in eachindex(names)
-        collect_track(names[i]; seed=i)
+        collect_track(names[i])
     end
 end
