@@ -11,9 +11,10 @@
 # - unsure: its mean standard deviation is above `max_σ`; a small result
 #   that is unsure is dropped, so the tracker only predicts that estimate.
 # - late: a large result older than `max_age` is dropped.
-# - disagreeing: a large result too far from the small one for the same
-#   scan (more than `agree` combined standard deviations, on the median
-#   entry) is dropped, and the small one stays.
+# - disagreeing (off by default): a large result too far from the small one
+#   for the same scan (more than `agree` combined standard deviations, on the
+#   median entry) is dropped. The tracker uses such disagreement to learn the
+#   small network's bias, so it is kept unless `agree` is set.
 
 """
     Measurement
@@ -120,7 +121,7 @@ Base.@kwdef struct SelectorConfig
     # An estimate whose mean standard deviation is above this is "unsure"
     # (units as the estimate's).
     max_σ::NamedTuple = (e=0.3, ψe=0.3, κ_profile=0.5, widths=1.0, sight=3.0, clearance=3.0)
-    agree::Float64 = 4.0
+    agree::Float64 = Inf
     # Whether the small networks' results are used at all. Without them, an
     # estimate is only predicted between cloud results: a car running on the
     # cloud alone (with `AllCalls`).

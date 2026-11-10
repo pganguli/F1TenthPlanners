@@ -9,7 +9,8 @@ and tier:
   but its result comes back later, and each call costs.
 
 A Kalman filter combines the results over time, counting each at the time of
-its scan, so a late cloud result is put where it belongs. The networks are
+its scan, so a late cloud result is put where it belongs, and learning from
+the cloud's results the car network's bias, which it takes off the car's. The networks are
 trained on the simulator's ground truth, not on a hand-written estimator,
 so they can beat one.
 
@@ -61,7 +62,8 @@ using LidarLaneNets
 
 nets = load_nets("weights")      # (small=(e=…, …), large=(…)): small_weak on the car, large in the cloud
 est = TieredEstimator(nets; schedule=RoundRobin())
-tracker = LaneTracker(0.257)                      # front axle 0.257 m ahead of the rear axle
+noise = load_noise("weights")                     # measured for small_weak and large
+tracker = LaneTracker(0.257; cfg=TrackerConfig(noise))   # front axle 0.257 m ahead of the rear axle
 
 # every scan, at time t [s], with the car's speed and yaw rate:
 meas = observe!(est, ranges, t; lane, v, yaw_rate)   # small results now, cloud results as they arrive
@@ -93,19 +95,62 @@ cloud, too far from the small result for the same scan (`agree` σ). With
 `use_small=false` the small results are never used: a car on the cloud
 alone.
 
-### Merging a late cloud result
+### Combining the car's and the cloud's results
 
-The small result for scan k is used at once. When the cloud's result for
-scan k arrives, it **replaces** the small one for that scan, and the filter
-is run again from scan k to now (it keeps the last 10 scans' priors and
-measurements). This is the exact solution of the out-of-sequence
-measurement problem by reprocessing; Bar-Shalom's algorithms (2002; with
-Chen and Mallick, 2004) reach it without storing the history, which only
-pays for large states. The profiles are replayed the same way.
+Both tiers measure the same quantities, but their errors differ in kind.
+The car network's error is mostly the **same from one scan to the next**
+(the scene barely changes in 25 ms): on the validation drives, 55–100% of
+its variance persists, for 70–270 ms. So the tracker models
 
-Replacing rather than fusing the two: both come from the same scan, so
-their errors are correlated, and fusing them as independent would make the
-filter overconfident. See the measured correlations below.
+    car:   z = x + b + v      b: the car network's bias (Gauss-Markov), v: white
+    cloud: z = x + w          w: white
+
+and a cloud result, compared with the car's for the same scan, reveals the
+car network's current bias, which the tracker takes off the car's following
+results until it has drifted.
+
+- **e, ψe, κ**: an unscented Kalman filter over them and the car's biases on
+  them; the motion between scans from the speed and yaw rate.
+- **κ_profile, the widths, sight, clearance** (no good motion model: a corner
+  changes them within a few scans): per number, a Kalman filter on the car's
+  bias alone, fed by every scan both tiers measured (z_car − z_cloud); the
+  estimate is the car's latest result less that bias, or, without one, the
+  cloud's latest, aged by the distance driven since its scan (the profiles,
+  which stay put on the ground, also shifted).
+- **Long tails**: an update is a robust (Student t) one, with the tail
+  weights measured for each network set, except where both tiers measured
+  the same number at the same scan: there a difference larger than expected
+  is evidence that the car's bias is larger than usual (its tails are long
+  too), so the bias's variance is raised to match it (adaptive covariance
+  inflation) and the bias can jump to what the cloud shows. Without this, a
+  rare large bias (0.3 rad of heading error, deep in a YasMarina hairpin,
+  where the usual size is 0.02) read as a wild cloud result, and the car
+  crashed there on every run. It still does when the cloud's results come
+  too rarely or too late (see LidarRacer.jl's results).
+- **Late results** count at their own scan: the tracker keeps the last 10
+  scans and filters again from the late one's (the exact solution of the
+  out-of-sequence measurement problem by reprocessing; Bar-Shalom's
+  algorithms, 2002 and with Chen and Mallick 2004, reach it without storing
+  the history, which only pays for large states).
+
+The noise parameters (how much and how long the car's error persists, its
+size, the tail weights) are measured on the validation tracks by
+[`train/fusion.jl`](train/fusion.jl) into [`weights/fusion.toml`](weights/fusion.toml)
+and loaded with `load_noise`.
+
+On 2400 recorded driving scans (Spa), RMS error of the tracked estimates:
+
+| | e [m] | ψe [rad] | sight [m] | clearance ahead [m] |
+|---|---|---|---|---|
+| car only (`small_weak`) | 0.0076 | 0.0111 | 0.155 | 0.274 |
+| cloud only, 25 / 50 / 100 ms | 0.0075 / 0.0098 / 0.0165 | 0.0095 / 0.0104 / 0.0144 | 0.146 / 0.238 / 0.413 | 0.241 / 0.434 / 0.769 |
+| car + cloud, 25 / 50 / 100 ms | 0.0074 / 0.0074 / 0.0076 | 0.0102 / 0.0103 / 0.0107 | 0.137 / 0.143 / 0.152 | 0.177 / 0.227 / 0.268 |
+
+Combined, the estimates are at least as good as the car's alone at every
+latency, and worsen steadily as the cloud's results come later; sight and clearance
+are better than either tier's alone at every latency. (An earlier version
+kept the newest result, which was always the car's, and so used the cloud's
+sight and clearance not at all.)
 
 ## Cost and accuracy
 
@@ -145,8 +190,8 @@ see.)
 - The standard deviations are calibrated: 60–83% of errors are within one
   (68% if exactly Gaussian).
 - The car's and the cloud's errors for the same scan are correlated (0.61
-  to 0.99), which is why a cloud result replaces the car's rather than being
-  fused with it as if independent.
+  to 0.99): they share a part that neither can remove, which cancels in the
+  difference z_car − z_cloud the tracker learns the car's bias from.
 
 ## Error distributions
 
@@ -185,6 +230,7 @@ julia -t auto --project=. collect.jl      # data/: labeled scans from every race
 julia -t auto --project=. train.jl        # weights/: all 18 networks (small_weak, small_strong, large)
 julia -t auto --project=. evaluate.jl     # results/networks.md: cost and accuracy, on the held-out tracks
 julia -t auto --project=. errors.jl       # results/errors.md: the error distributions
+julia -t auto --project=. fusion.jl       # weights/fusion.toml: the noise the tracker combines the tiers with
 julia --project=. plots.jl                # results/*.pdf: accuracy against MACs, the error distributions
 ```
 

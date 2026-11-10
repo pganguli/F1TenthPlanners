@@ -25,6 +25,7 @@ using LinearAlgebra
 using Lux
 using Random
 using Statistics
+using TOML
 
 export PROFILE_STEP, PROFILE_LENGTH, PROFILE_S, CLEARANCE_K, RANGE_MAX, SIGHT_MAX, CLEARANCE_MAX, WIDTH_MAX
 export ESTIMATES, output_size, LaneLabels, lane_labels, w_left, w_right
@@ -33,7 +34,7 @@ export input_size, input_stride, beam_stride, predict
 export save_net, load_net, load_nets, weights_file
 export Measurement, SelectorConfig, TieredEstimator, observe!, set_schedule!
 export CloudSchedule, cloud_calls, NoCalls, AllCalls, FixedCalls, RoundRobin
-export TrackerConfig, LaneTracker, LaneState, track!
+export TrackerConfig, LaneTracker, LaneState, track!, EstimateNoise, default_noise, load_noise
 
 include("estimates.jl")
 include("nets.jl")

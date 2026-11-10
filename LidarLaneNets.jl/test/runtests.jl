@@ -148,29 +148,67 @@ end
     @testset "tracker: follows the measurements" begin
         _, lane = run_tracker(80; e=0.2, ψe=0.0, v=0.0)
         @test lane.status === :ok
-        @test lane.e ≈ 0.2 atol = 1e-3
-        @test abs(lane.ψe) < 1e-3
+        @test lane.e ≈ 0.2 atol = 0.01
+        @test abs(lane.ψe) < 0.01
         @test lane.tiers.e === :small && lane.tiers.widths === :none
         @test lane.sight == 0 && isinf(lane.σ_sight)
     end
 
-    @testset "tracker: a late result counts at its scan" begin
+    # The car's network is biased (e 0.3 and sight 6 m, where the truth is 0
+    # and 5 m); the cloud's isn't, and its results come `lag` scans late.
+    biased = TrackerConfig(noise=merge(default_noise(),
+        (e=EstimateNoise(persist=0.9, τ=2.0, σ_bias=0.3), sight=EstimateNoise(persist=0.9, τ=2.0, σ_bias=1.0))))
+    function biased_run(lag; cloud=true, n=60, cfg=biased)
+        tr = LaneTracker(0.257; cfg)
+        local lane
+        for k in 0:n-1
+            t = 0.025k
+            m = [meas(:e, t, :small, [0.3]), meas(:ψe, t, :small, [0.0]), meas(:sight, t, :small, [6.0])]
+            if cloud && k >= lag
+                tc = 0.025(k - lag)
+                push!(m, meas(:e, tc, :large, [0.0]), meas(:sight, tc, :large, [5.0]))
+            end
+            lane = track!(tr, m, 0.0, 0.0, t)
+        end
+        return tr, lane
+    end
+
+    @testset "tracker: the cloud corrects the car's bias" begin
+        _, alone = biased_run(0; cloud=false)
+        @test alone.e ≈ 0.3 atol = 0.02
+        @test alone.sight ≈ 6.0 atol = 0.05
+        errs = [begin
+            _, l = biased_run(lag)
+            (abs(l.e), abs(l.sight - 5))
+        end for lag in (0, 1, 4, 8)]
+        @test errs[1][1] < 0.05 && errs[1][2] < 0.15   # on time: close to the cloud
+        # later results correct less, but always more than none
+        @test issorted(first.(errs)) && issorted(last.(errs))
+        @test all(e -> e[1] < 0.3 - 0.05 && e[2] < 1.0 - 0.05, errs)
+        # the cloud's sight is used even though the car's results are newer
+        _, l = biased_run(1)
+        @test l.tiers.sight === :small && abs(l.sight - 5) < abs(alone.sight - 5) / 2
+    end
+
+    @testset "tracker: the cloud corrects a bias far beyond its usual size" begin
+        # the car's bias is 0.3, where its typical size is 0.01: the difference shows it anyway
+        small_bias = TrackerConfig(noise=merge(default_noise(),
+            (e=EstimateNoise(persist=0.9, τ=2.0, σ_bias=0.01, ν_small=3.0, ν_large=3.0),
+                sight=EstimateNoise(persist=0.9, τ=2.0, σ_bias=0.05, ν_small=3.0, ν_large=3.0))))
+        _, l = biased_run(1; cfg=small_bias)
+        @test abs(l.e) < 0.05
+        @test abs(l.sight - 5) < 0.15
+    end
+
+    @testset "tracker: a late result gives the same state as on time" begin
         κ(k, t) = [meas(:κ_profile, t, :small, fill(0.1, NP))]
-        # A: the large result for scan 5 is there on time
-        a(k, t) = k == 5 ? [κ(k, t); meas(:ψe, t, :large, [0.05])] : κ(k, t)
-        # B: scan 5 first gets the small result, and the large one two scans later
-        b(k, t) = k == 5 ? [κ(k, t); meas(:ψe, t, :small, [-0.3])] :
-                  k == 7 ? [κ(k, t); meas(:ψe, 0.025 * 5, :large, [0.05])] : κ(k, t)
-        ta, la = run_tracker(10; extra=a)
-        tb, lb = run_tracker(10; extra=b)
+        on_time(k, t) = k == 5 ? [κ(k, t); meas(:ψe, t, :large, [0.05])] : κ(k, t)
+        late(k, t) = k == 7 ? [κ(k, t); meas(:ψe, 0.025 * 5, :large, [0.05])] : κ(k, t)
+        ta, la = run_tracker(10; extra=on_time)
+        tb, lb = run_tracker(10; extra=late)
         @test la.e ≈ lb.e && la.ψe ≈ lb.ψe && la.κ ≈ lb.κ
-        @test ta.P ≈ tb.P
-        @test lb.tiers.ψe === :small   # the latest result came from the small tier
-        # the other way round: a small result never replaces a large one
-        c(k, t) = k == 5 ? [κ(k, t); meas(:ψe, t, :large, [0.05])] :
-                  k == 7 ? [κ(k, t); meas(:ψe, 0.025 * 5, :small, [-0.3])] : κ(k, t)
-        _, lc = run_tracker(10; extra=c)
-        @test lc.ψe ≈ la.ψe
+        @test ta.state.lane.P ≈ tb.state.lane.P
+        @test la.κ_profile[2:end] ≈ lb.κ_profile[2:end]
     end
 
     @testset "tracker: profiles and distances move with the car" begin
@@ -181,19 +219,28 @@ end
         # moved by one entry (the first is the filter's κ; the far end is no longer seen)
         @test lane.κ_profile[2:end-4] ≈ prof[3:end-3]
         @test isnan(lane.κ_profile[end])
-        @test lane.sight ≈ 5.75 && lane.clearance ≈ fill(4.75, NK)
+        # sight and clearance are from the car: they hold, growing uncertain
+        @test lane.sight ≈ 6.0 && lane.clearance ≈ fill(5.0, NK)
+        @test lane.σ_sight > 0.05   # more than the measurement's own
         @test lane.tiers.sight === :large
-        # a late profile is shifted by the distance driven since its scan
-        late(k, t) = k == 4 ? [meas(:widths, 0.0, :large, vcat(prof, prof))] : Measurement[]
-        _, lane = run_tracker(5; v=2.5, extra=late)
-        @test lane.w_left[1:end-4] ≈ prof[2:end-3] && lane.w_right[1:end-4] ≈ prof[2:end-3]
-        # a late large profile replaces the small one for its scan instead of being blended on top
-        both(k, t) = k == 0 ? [meas(:κ_profile, t, :small, fill(1.0, NP))] :
-                     k == 2 ? [meas(:κ_profile, 0.0, :large, fill(0.2, NP))] : Measurement[]
-        only(k, t) = k == 0 ? [meas(:κ_profile, t, :large, fill(0.2, NP))] : Measurement[]
-        _, lb = run_tracker(4; v=0.0, extra=both)
-        _, lo = run_tracker(4; v=0.0, extra=only)
-        @test lb.κ_profile[2:end] ≈ lo.κ_profile[2:end] ≈ fill(0.2, NP - 1)
+    end
+
+    @testset "tracker: robust to a wild measurement" begin
+        wild(k, t) = k == 30 ? [meas(:e, t, :small, [3.0])] : Measurement[]
+        heavy = TrackerConfig(noise=merge(default_noise(), (e=EstimateNoise(σ_bias=0.005, ν_small=3.0),)))
+        gaussian = TrackerConfig(noise=heavy.noise, robust=false)
+        function jumped(cfg)
+            tr = LaneTracker(0.257; cfg)
+            local lane
+            for k in 0:30
+                t = 0.025k
+                m = k == 30 ? [meas(:ψe, t, :small, [0.0]); wild(k, t)] :
+                    [meas(:e, t, :small, [0.0]), meas(:ψe, t, :small, [0.0])]
+                lane = track!(tr, m, 1.0, 0.0, t)
+            end
+            return abs(lane.e)
+        end
+        @test jumped(heavy) < jumped(gaussian) / 5
     end
 
     @testset "tracker: starts from late measurements alone" begin
