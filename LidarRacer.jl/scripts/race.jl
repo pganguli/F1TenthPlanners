@@ -180,12 +180,14 @@ Drive `laps` laps (or until a crash or `max_time` seconds) with a
 [`Racer`](@ref) on the networks `nets`, calling the cloud as `schedule()`
 (a function making a fresh `CloudSchedule`) decides; `speed` caps the speed,
 and any other keywords (`selector`, `tracking`, `stanley`, `margin`,
-`latency`, `k_σ`) replace the Racer's defaults.
+`latency`, `k_σ`) replace the Racer's defaults. `tracking` defaults to
+the noise measured for the default networks (weights/fusion.toml).
 `timestep` is the simulator's step [s] (it also sets how precisely a
 command's latency is timed), and `seed` seeds the LiDAR noise. With `render`,
 the run is drawn at `RENDER_FPS` and paced to real time.
 """
-function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin, speed=nothing, laps=1, pose=nothing,
+function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
+                 tracking=TrackerConfig(noise=load_noise(DEFAULT_WEIGHTS)), speed=nothing, laps=1, pose=nothing,
                  map_ext=".png", render=false, timestep=0.0025, max_time=600.0, seed=12345, racer...)
     path = centerline(map_name)
     if pose === nothing
@@ -197,7 +199,7 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
     params = env.params
     car = CarParams(params)
     controller = Racer(car, env.sim.agents[1].lidar.scan_angles, env.lidar_dist, nets; schedule=schedule(),
-        v_max=something(speed, car.speed_cmd_max), racer...)
+        tracking, v_max=something(speed, car.speed_cmd_max), racer...)
 
     render && add_render_callback!(env, e -> render_callback(e, env, controller))
     obs, _, _, _ = reset!(env, [pose[1] pose[2] pose[3]])
@@ -395,6 +397,7 @@ function main(args=ARGS)
     o = parse_args(args)
     nets = load_nets(o[:weights]; small=Symbol(o[:small]))
     racer = (; nets, schedule=schedule_maker(o[:cloud]),
+        tracking=TrackerConfig(noise=load_noise(o[:weights]; small=Symbol(o[:small]))),
         selector=SelectorConfig(remote_latency=o[:cloud_latency] / 1000, remote_drop=o[:cloud_drop],
             use_small=!o[:cloud_only]))
     if o[:map] in ("all", "test")

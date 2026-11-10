@@ -93,8 +93,8 @@ julia -t auto --project=scripts scripts/compare.jl --seeds 8 50 100   # every co
 `roundrobin` (the default), or a list of estimates to call every scan);
 `--cloud-only` drops the small networks; `--cloud-latency` (ms, default 25)
 and `--cloud-drop` set the simulated network; `--small` the car's networks
-(`small_weak`, the default, or `small_strong`; the cloud always runs
-`large`). The weights come from `../LidarLaneNets.jl/weights` (Git LFS).
+(`small_weak`, the default and the only set the results use, or
+`small_strong`; the cloud always runs `large`). The weights come from `../LidarLaneNets.jl/weights` (Git LFS).
 
 The controller runs on each new scan (every 25 ms). Each command takes
 effect 7.5 ms after its scan is published. That covers computing it and
@@ -123,48 +123,58 @@ to score the run.
 The networks never saw these five tracks (Spa, Monza, Silverstone,
 Oschersleben, YasMarina) in training. Every configuration ran one lap of
 each, 8 times (a seed sets the LiDAR's noise and where the lap starts): 40
-runs. Safety is measured from the true map and state. The full tables,
-with 95% confidence intervals, run-for-run differences against the car's
-networks alone, and lap times, are in
-[`scripts/results/compare-small_weak.md`](scripts/results/compare-small_weak.md)
-and [`scripts/results/compare-small_strong.md`](scripts/results/compare-small_strong.md);
-every run is in the CSVs beside them.
+runs. `small_weak` runs on the car and `large` in the cloud. Safety is
+measured from the true map and state. The full tables, with 95% confidence
+intervals, run-for-run differences against the car's networks alone, and
+lap times, are in
+[`scripts/results/compare-small_weak.md`](scripts/results/compare-small_weak.md);
+every run is in [`runs-small_weak.csv`](scripts/results/runs-small_weak.csv)
+beside it.
 
-**With `small_weak` on the car** (the default; the cloud runs `large`).
 Crashes in 40 runs:
 
 | Estimates from | Cloud calls per scan | 25 ms cloud latency | 50 ms | 100 ms |
 |---|---|---|---|---|
 | the car's networks only | 0 | 8 | 8 | 8 |
-| the cloud's only | 6 | **0** | **0** | 6 |
-| the car's, and the cloud's for every estimate | 6 | 7 | 2 | **0** |
-| the car's, and the cloud's in turn (round robin) | 1 | 4 | 2 | 4 |
-| the car's, and the cloud's far ahead (κ_profile, widths, sight) | 3 | 3 | **0** | 1 |
+| the cloud's only | 6 | **0** | **0** | 2 |
+| the car's, and the cloud's for every estimate | 6 | **0** | **0** | 8 |
+| the car's, and the cloud's in turn (round robin) | 1 | 4 | 7 | 8 |
+| the car's, and the cloud's far ahead (κ_profile, widths, sight) | 3 | **0** | **0** | 7 |
 
-- At 25 ms the cloud alone is the safest: the car's weak estimates, used
-  at once, cost more than the cloud's one-scan delay.
-- At 50 ms (a public cloud over 5G) the car's networks with the cloud's far
-  ahead are as safe as the cloud alone (no crashes, the same 0.10 m
-  closest approach), with half the calls and fewer scans planning on too
-  much free distance (3.9% against 4.9%); both are far safer than the car
-  alone.
-- At 100 ms a combination is safer than either tier alone: the car's
-  networks with the cloud's for every estimate never crashed, against 6
-  (the cloud alone) and 8 (the car alone).
+How close the car came to the walls, at 50 ms (a public cloud over 5G):
 
-No fixed configuration is the safest at every latency, which is the case
-for switching by latency (a `CloudSchedule` that reads it).
+| Estimates from | Closest to a wall, worst run | Closest to a wall, mean | Time within 0.2 m of a wall | Scans with time to collision under 0.5 s | Heading error (RMS) |
+|---|---|---|---|---|---|
+| the car's networks only | 0.07 m | 0.27 m | 0.22% | 0.94% | 1.92° |
+| the cloud's only | 0.10 m | 0.33 m | 0.18% | 0.15% | 1.96° |
+| the car's, and the cloud's for every estimate | **0.19 m** | 0.36 m | **0%** | **0%** | **1.25°** |
+| the car's, and the cloud's far ahead | **0.19 m** | 0.37 m | **0%** | **0%** | **1.26°** |
 
-**With `small_strong` on the car**, the car's networks alone never crash;
-the cloud alone is again the safest at 25 ms and crashes 6 times at 100 ms,
-and keeping the car's networks on is the safest from 50 ms on.
+- **Combining is safer than either tier alone at 25 and 50 ms.** With the
+  cloud far ahead or for every estimate, no run crashed, came within 0.2 m
+  of a wall, or got under 0.5 s from a collision. The worst run's closest
+  approach is about twice the cloud alone's (0.19 m against 0.10 m at
+  50 ms; 0.29–0.35 m against 0.10 m at 25 ms). The heading is tracked about
+  a third more accurately than by either tier alone.
+- **Far ahead does it with half the cloud calls**, and it is the only
+  configuration that plans on too much free distance less often than the
+  car alone (4.8% of scans against 5.9% at 50 ms).
+- **It gets worse as the cloud's latency grows.** At 100 ms every
+  combination crashes on YasMarina like the car alone, and the cloud alone
+  crashes twice on Monza.
+- **Every crash of a combination is on YasMarina.** In its hairpin the
+  car's heading network is off by about 0.3 rad, far beyond its usual bias.
+  The cloud's results correct it, but only if they come often enough and
+  soon enough: round robin calls the cloud for the heading every 6th scan,
+  and at 100 ms each result is 4 scans old. Calling the cloud when the car
+  enters such a corner is what an adaptive `CloudSchedule` would do.
 
-In about 4–5% of scans, in every configuration, the speed is set for a free
-distance ahead more than 0.25 m longer than the true one (the clearance
-networks' errors are biased toward too much room; see LidarLaneNets.jl).
+The combinations that call the cloud's clearance (for every estimate, and
+round robin) plan on too much free distance in more scans than the car
+alone: 6.5–8.0% against 5.9%.
 
-Lap times barely differ between configurations that finish (within about
-2%; the true estimates give 74.0 s on average, against about 75–78 s here).
+Lap times barely differ between configurations that finish (75–78 s on
+average; the true estimates give 74.0 s).
 
 For reference, the hand-written estimator on `main` laps these tracks in
 74.6 s on average (one seed), with its own planner, which plans out to 10 m
@@ -173,8 +183,12 @@ approximate.
 
 The planner, Stanley and speed settings were tuned with the hand-written
 estimator on `main` (on 12 racetracks, checked on the other 11) and are
-kept. The Kalman filter's process noise is the same; its measurement noise
-is each network's own standard deviation for each scan.
+kept. The car's and the cloud's results are combined by LidarLaneNets.jl's
+filter (an unscented Kalman filter that also tracks the car networks'
+slowly varying bias, with late cloud results put at their own scan), using
+the noise measured on the validation tracks in
+[`weights/fusion.toml`](../LidarLaneNets.jl/weights/fusion.toml); see
+LidarLaneNets.jl's README.
 
 ## Tests
 

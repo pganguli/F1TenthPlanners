@@ -68,6 +68,7 @@ end
 
 function compare(latencies_ms; seeds=5, weights=DEFAULT_WEIGHTS, small=:small_weak)
     nets = load_nets(weights; small)
+    tracking = TrackerConfig(noise=load_noise(weights; small))
     suffix = "-$small"
     F1Tenth.THREAD_AGENTS[] = false
     runs = [(track, k) for track in TEST_TRACKS for k in 1:seeds]
@@ -79,7 +80,7 @@ function compare(latencies_ms; seeds=5, weights=DEFAULT_WEIGHTS, small=:small_we
         results = Vector{RunResult}(undef, length(runs))
         Threads.@threads :dynamic for i in eachindex(runs)
             track, k = runs[i]
-            results[i] = run_map(track; nets, schedule, selector, seed=1000k, pose=start_pose(track, k, seeds))
+            results[i] = run_map(track; nets, schedule, selector, tracking, seed=1000k, pose=start_pose(track, k, seeds))
         end
         push!(rows, (name, name == "small only" ? "–" : string(round(Int, lat)), results))
         println(name, ", ", rows[end][2], " ms: ", count(r -> r.finished, results), " of ", length(results), " laps")
