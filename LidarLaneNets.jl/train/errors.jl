@@ -1,23 +1,16 @@
-# What the networks' errors look like: the distribution that fits them best.
+# How the networks' errors are distributed: a Student t, fitted to each.
 #
 #     julia -t auto --project=. errors.jl      # prints, and writes results/errors.md
 #
-# For every network (estimate × network set, see LidarLaneNets.NETWORKS): its errors
-# (estimate − truth) on the held-out tracks' scans while driving, over the
-# same entries as the RMS errors (profiles: the entries the car can see,
-# pooled over the distance ahead). Three candidates, each fitted by maximum
-# likelihood:
-#
-# - Gaussian (μ, σ);
-# - Laplace (μ, b): heavier tails, exponential;
-# - Student t (μ, s, ν): heavier still, polynomial tails; ν is how heavy (a
-#   Gaussian as ν → ∞; a Cauchy at ν = 1).
-#
-# The best by AIC is named. Tail check: how often each fitted model says the
-# error is beyond the observed 99.9th percentile of |error − μ| (0.1% if the
-# model's tails are right). The same fit is also done on the errors divided by
-# the network's own standard deviation (what the selector and the Kalman
-# filter treat as a standard Gaussian).
+# For every network (estimate × network set, see LidarLaneNets.NETWORKS): its
+# errors (estimate − truth) on the held-out tracks' scans while driving, over
+# the same entries as the RMS errors (profiles: the entries the car can see,
+# pooled over the distance ahead); and the same errors divided by the
+# network's own standard deviation. A Gaussian, a Laplace and a Student t
+# were each fitted by maximum likelihood; the Student t had the least AIC for
+# every network's errors, so it alone is reported: location μ, scale s,
+# degrees of freedom ν (tails heavier the smaller ν; a Gaussian as ν → ∞, a
+# Cauchy at ν = 1). How often each candidate won is checked and written too.
 
 include("evaluate.jl")   # data loading, means_sigmas, mask
 using Random
@@ -91,19 +84,8 @@ end
 
 g(x; d=3) = string(round(x; sigdigits=d))
 
-function row(est, name, x, unit)
-    fits, aic, best, tails = fit_all(x)
-    G, L, T = fits[:gauss][1], fits[:laplace][1], fits[:t][1]
-    ΔL, ΔT = aic[:gauss] - aic[:laplace], aic[:gauss] - aic[:t]
-    return "| `$est` | $name | $(NAMES[best]) | μ $(g(G.μ)), σ $(g(G.σ)) | μ $(g(L.μ)), b $(g(L.b)) | " *
-           "μ $(g(T.μ)), s $(g(T.s)), **ν $(g(T.ν; d=2))** | $(g(ΔL)) / $(g(ΔT)) | " *
-           "$(g(100tails[:gauss]; d=2)) / $(g(100tails[:laplace]; d=2)) / $(g(100tails[:t]; d=2)) |" *
-           (isempty(unit) ? "" : " $unit |")
-end
-
-const HEAD = "| Estimate | Network | Best fit (AIC) | Gaussian | Laplace | Student t | AIC better than Gaussian by: " *
-             "Laplace / t | Beyond the observed 99.9th percentile, % (Gaussian / Laplace / t; 0.1 is right) |"
-const RULE = "|---|---|---|---|---|---|---|---|"
+tparams(x) = fit_t(x)[1]
+t_text(p) = "$(g(p.μ)) | $(g(p.s)) | $(g(p.ν; d=2))"
 
 function main()
     rng = Xoshiro(1)
@@ -111,8 +93,9 @@ function main()
     driving = .!reduce(vcat, (x["static"] for x in dte))
     Yd = Dict(k => v[:, driving] for (k, v) in Yte)
     unit = Dict(:e => "m", :ψe => "rad", :κ_profile => "1/m", :widths => "m", :sight => "m", :clearance => "m")
-    raw = [HEAD * " Unit |", RULE * "---|"]
-    std = [HEAD, RULE]
+    rows = ["| Estimate | Network | μ | s | ν | Unit | μ / σ | s / σ | ν / σ |", "|---|---|---|---|---|---|---|---|---|"]
+    wins = Dict(:raw => Dict(n => 0 for (n, _, _) in MODELS), :std => Dict(n => 0 for (n, _, _) in MODELS))
+    exceptions = String[]
     for est in ESTIMATES, name in NETWORKS
         net = load_net(weights_file(WEIGHTS_DIR, est, name))
         μ, σ = means_sigmas(net, Xte)
@@ -123,33 +106,37 @@ function main()
             keep = randperm(rng, length(err))[1:MAX_FIT]
             err, z = err[keep], z[keep]
         end
-        push!(raw, row(est, name, err, unit[est]))
-        push!(std, row(est, name, z, ""))
-        println(raw[end]); flush(stdout)
+        fits_e, _, best_e, _ = fit_all(err)
+        fits_z, _, best_z, _ = fit_all(z)
+        wins[:raw][best_e] += 1
+        wins[:std][best_z] += 1
+        best_e === :t || push!(exceptions, "`$est`, $name (errors): $(NAMES[best_e])")
+        best_z === :t || push!(exceptions, "`$est`, $name (errors over σ): $(NAMES[best_z])")
+        push!(rows, "| `$est` | $name | $(t_text(fits_e[:t][1])) | $(unit[est]) | $(t_text(fits_z[:t][1])) |")
+        println(rows[end]); flush(stdout)
     end
+    n = length(ESTIMATES) * length(NETWORKS)
+    won = "The Student t had the least AIC of the three for $(wins[:raw][:t]) of $n networks' errors and " *
+          "$(wins[:std][:t]) of $n of the errors over σ" *
+          (isempty(exceptions) ? "." : " (otherwise: " * join(exceptions, "; ") * ").")
     mkpath(RESULTS_DIR)
     write(joinpath(RESULTS_DIR, "errors.md"), """
         # How the networks' errors are distributed
 
-        Errors (estimate − truth) on the held-out tracks ($(join(TEST_TRACKS, ", "))) while driving, over the
-        same entries as the RMS errors (profiles: the entries the car can see, pooled over the distance
-        ahead; at most $(MAX_FIT) errors per fit, a random subset). Each candidate fitted by maximum
-        likelihood. Student t: location μ, scale s, degrees of freedom ν (tails heavier the smaller ν; a
-        Gaussian as ν → ∞, a Cauchy at ν = 1). AIC differences: how much better than the Gaussian (larger is
-        better; differences above ~10 are decisive). Tail check: how often each fitted model puts an error
-        beyond the observed 99.9th percentile of |error − μ|; a model whose tails are right says 0.1%.
-        From [`errors.jl`](../errors.jl). The networks are those of [networks.md](networks.md).
+        A Student t, fitted by maximum likelihood to every network's errors (estimate − truth) on the
+        held-out tracks ($(join(TEST_TRACKS, ", "))) while driving, over the same entries as the RMS errors
+        (profiles: the entries the car can see, pooled over the distance ahead; at most $(MAX_FIT) errors
+        per fit, a random subset); and to the same errors divided by the network's own standard deviation
+        (columns "/ σ": what the selector and the Kalman filter treat as a standard Gaussian). Location μ,
+        scale s, degrees of freedom ν: the tails are heavier the smaller ν (a Gaussian as ν → ∞, a Cauchy
+        at ν = 1). Its density: Γ((ν+1)/2) / (Γ(ν/2) √(νπ) s) · (1 + ((x − μ)/s)² / ν)^(−(ν+1)/2).
 
-        ## The errors
+        $won A Gaussian and a Laplace were the other candidates. From [`errors.jl`](../errors.jl); the
+        networks are those of [networks.md](networks.md).
 
-        $(join(raw, "\n"))
-
-        ## The errors over the network's own standard deviation
-
-        What the selector and the Kalman filter assume is a standard Gaussian (μ 0, σ 1).
-
-        $(join(std, "\n"))
+        $(join(rows, "\n"))
         """)
+    println(won)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

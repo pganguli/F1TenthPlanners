@@ -112,7 +112,9 @@ filter overconfident. See the measured correlations below.
 Every network against the hand-written estimator (LidarLaneEstimation.jl), on
 the five tracks never seen in training (24 000 scans while driving), is in
 [`train/results/networks.md`](train/results/networks.md), with links to each
-network's weights (from [`train/evaluate.jl`](train/evaluate.jl)). In short:
+network's weights (from [`train/evaluate.jl`](train/evaluate.jl)), and
+drawn in [`train/results/accuracy_vs_macs.pdf`](train/results/accuracy_vs_macs.pdf).
+In short:
 
 | Network set | MACs per scan, all six | Parameters, all six |
 |---|---|---|
@@ -148,28 +150,29 @@ see.)
 
 ## Error distributions
 
-The errors are long-tailed: for every network a **Student t** fits them best
-by far (AIC), and a Gaussian fitted to them puts essentially none of the
-worst 0.1% where they are. Fitted parameters for every network, Gaussian and
-Laplace for comparison, and a tail check, are in
+The errors are long-tailed, and one distribution fits them all: a **Student
+t** had the least AIC (against a Gaussian and a Laplace) for every network's
+errors, and for 17 of 18 of the errors divided by the network's own σ (a
+Laplace, barely, for `small_weak`'s widths). Its location μ, scale s and
+degrees of freedom ν for every network are in
 [`train/results/errors.md`](train/results/errors.md) (from
-[`train/errors.jl`](train/errors.jl)). Degrees of freedom ν (smaller is
-heavier; a Gaussian as ν → ∞, a Cauchy at 1), for the car's / the cloud's
-networks:
+[`train/errors.jl`](train/errors.jl)), and drawn in
+[`train/results/error_distributions.pdf`](train/results/error_distributions.pdf).
+ν, smaller for heavier tails (a Gaussian as ν → ∞, a Cauchy at 1):
 
-| Estimate | Errors: ν (`small_weak` / `large`) | Errors over the network's own σ: ν (`small_weak` / `large`) |
+| Estimate | Errors: ν (`small_weak` / `small_strong` / `large`) | Errors over the network's own σ: ν |
 |---|---|---|
-| `e` | 3.9 / 3.9 | 9.4 / 7.1 |
-| `ψe` | 2.1 / 2.0 | 6.2 / 5.4 |
-| `κ_profile` | 0.82 / 0.79 (pooled over the distance ahead) | 3.0 / 3.4 |
-| `widths` | 5.2 / 4.6 | 3.6 / 6.0 |
-| `sight` | 0.88 / 1.1 | 2.8 / 5.8 |
-| `clearance` | 1.2 / 1.8 | 7.1 / 11 |
+| `e` | 3.9 / 3.9 / 3.9 | 9.4 / 7.1 / 7.1 |
+| `ψe` | 2.1 / 2.1 / 2.0 | 6.2 / 6.0 / 5.4 |
+| `κ_profile` | 0.82 / 0.77 / 0.79 (pooled over the distance ahead) | 3.0 / 3.4 / 3.4 |
+| `widths` | 5.0 / 4.8 / 4.6 | 3.6 / 6.2 / 6.0 |
+| `sight` | 0.88 / 1.3 / 1.1 | 2.8 / 5.0 / 5.8 |
+| `clearance` | 1.2 / 1.6 / 1.8 | 7.1 / 7.4 / 11 |
 
 Divided by the network's own standard deviation, the errors are much closer
 to Gaussian (scale about 1): the networks' σ accounts for most of the tails.
-The clearance errors are biased toward too much free distance, by 0.15 (car)
-to 0.37 (cloud) of their σ.
+The clearance errors are biased toward too much free distance, by 0.13
+(small) to 0.37 (large) of their σ.
 
 ## Training
 
@@ -182,6 +185,7 @@ julia -t auto --project=. collect.jl      # data/: labeled scans from every race
 julia -t auto --project=. train.jl        # weights/: all 18 networks (small_weak, small_strong, large)
 julia -t auto --project=. evaluate.jl     # results/networks.md: cost and accuracy, on the held-out tracks
 julia -t auto --project=. errors.jl       # results/errors.md: the error distributions
+julia --project=. plots.jl                # results/*.pdf: accuracy against MACs, the error distributions
 ```
 
 - **Labels** ([`truth.jl`](train/truth.jl)): the true value of every

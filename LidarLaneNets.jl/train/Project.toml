@@ -1,4 +1,5 @@
 [deps]
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 F1Tenth = "ec9dc3f2-e932-4b18-a493-a4686694dcbe"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 LidarLaneEstimation = "df66ebbf-4f73-4268-99b2-bc89cfec981b"
