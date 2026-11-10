@@ -36,7 +36,7 @@ car = CarParams(lf=0.130, lr=0.127, width=0.228, s_max=0.4189,
 
 # beam angles [rad], how far the LiDAR sits ahead of the center of gravity [m],
 # the networks, and when to call the cloud
-nets = load_nets("../LidarLaneNets.jl/weights")
+nets = load_nets("../LidarLaneNets.jl/weights")   # small_weak on the car, large in the cloud
 racer = Racer(car, range(-3π / 4, 3π / 4; length=1081), 0.143, nets; schedule=RoundRobin())
 
 # on each new scan: measured speed and yaw rate, time since the last scan
@@ -86,14 +86,15 @@ julia --project=scripts scripts/race.jl Spa --speed 3     # cap the speed
 julia --project=scripts scripts/race.jl path/to/map --pose X Y THETA
 julia -t auto --project=scripts scripts/race.jl test --cloud none    # held-out tracks, small networks only
 julia --project=scripts scripts/race.jl Spa --cloud all --cloud-only --cloud-latency 100
-julia -t auto --project=scripts scripts/compare.jl 50 100           # every configuration (results/compare.md)
+julia -t auto --project=scripts scripts/compare.jl --seeds 8 50 100   # every configuration (results/compare-small_weak.md)
 ```
 
 `--cloud` picks when to call the cloud's large networks (`none`, `all`,
 `roundrobin` (the default), or a list of estimates to call every scan);
 `--cloud-only` drops the small networks; `--cloud-latency` (ms, default 25)
-and `--cloud-drop` set the simulated network. The weights come from
-`../LidarLaneNets.jl/weights` (Git LFS).
+and `--cloud-drop` set the simulated network; `--small` the car's networks
+(`small_weak`, the default, or `small_strong`; the cloud always runs
+`large`). The weights come from `../LidarLaneNets.jl/weights` (Git LFS).
 
 The controller runs on each new scan (every 25 ms). Each command takes
 effect 7.5 ms after its scan is published. That covers computing it and
@@ -147,6 +148,27 @@ Every other configuration finishes every lap.
   gain from the cloud is small; the speed is limited mostly by how far ahead
   the lane is seen and the 2.5 m/s² braking. The true estimates are 2.3%
   faster than the small networks.
+
+Safety, from the true map and state (worst case over the five tracks;
+fractions are means over the tracks):
+
+| Estimates from | Cloud latency | Crashes | Closest to a wall | Time within 0.2 m of a wall | Least time to collision | Scans with time to collision under 0.5 s | Largest slip angle |
+|---|---|---|---|---|---|---|---|
+| small networks only | – | 0 | 0.19 m | 0.10% | 0.36 s | 0.10% | 6.4° |
+| large networks only | 25 ms | 0 | 0.19 m | 0.04% | 0.46 s | 0.02% | 4.7° |
+| large networks only | 50 ms | 0 | 0.10 m | 0.17% | 0.26 s | 0.15% | 5.0° |
+| large networks only | 100 ms | **1** | 0.10 m | **0.57%** | **0.19 s** | **1.28%** | **7.3°** |
+| small, and large far ahead | 25–100 ms | 0 | 0.16–0.19 m | 0.07–0.16% | 0.31–0.34 s | 0.08–0.14% | 5.3–6.3° |
+| small, and large for every estimate | 25–100 ms | 0 | 0.14–0.19 m | 0.04–0.19% | 0.33–0.34 s | 0.09–0.12% | 5.2–6.0° |
+
+With fresh cloud results (25 ms) the large networks alone are the safest;
+as the cloud slows, they become the least safe by every measure, while the
+configurations that keep the small networks on stay where the small
+networks alone are. In about 5% of scans, in every configuration, the speed
+is set for a free distance ahead more than 0.25 m longer than the true one;
+the cloud's clearance network lowers that only slightly (5.0% to 4.7%).
+These are single laps with one LiDAR noise seed, so differences of a few
+hundredths of a percent are noise.
 
 The hand-written estimator's lap times come from its own planner (on
 `main`, which plans out to 10 m from the scan's points; here the profiles

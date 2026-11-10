@@ -51,7 +51,9 @@ options:
                    --cloud all, a car running on the large networks alone
   --cloud-latency MS  from a scan to its cloud results [ms] (default 25)
   --cloud-drop P   chance a call's results never arrive (default 0)
-  --weights DIR    the networks (default ../LidarLaneNets.jl/weights)
+  --small SET      the car's networks: small_weak (the default) or small_strong;
+                   the cloud's are always the large set
+  --weights DIR    where the networks are (default ../LidarLaneNets.jl/weights)
   --speed V        cap the speed at V m/s (default: the car's top speed)
   --laps N         laps to drive (default 1)
   --pose X Y THETA start pose; required for maps that are not racetracks
@@ -97,7 +99,20 @@ struct RunResult
     calls::Float64            # cloud calls per scan
     min_gap::Float64          # [m]
     wall_time::Float64
+    # safety, from the true map and state
+    close::Float64            # fraction of the time the body was within CLOSE_GAP of a wall
+    min_ttc::Float64          # least time to collision along the arc driven [s]
+    low_ttc::Float64          # fraction of scans with time to collision under LOW_TTC
+    max_slip::Float64         # largest slip angle [rad]
+    max_lat_acc::Float64      # largest lateral acceleration, speed × yaw rate [m/s²]
+    optimistic::Float64       # fraction of scans whose planned free distance ahead overestimated the true one by OPTIMISM
 end
+
+# Safety thresholds: a body this close to a wall [m], a time to collision this
+# short [s], a free distance ahead overestimated by this much [m].
+const CLOSE_GAP = 0.2
+const LOW_TTC = 0.5
+const OPTIMISM = 0.25
 
 """
     wall_gap(map::F1Tenth.MapData, x, y, θ, length, width) -> d
@@ -121,6 +136,41 @@ function wall_gap(m::F1Tenth.MapData, x, y, θ, length, width)
         gap = min(gap, m.dt[row+1, col+1])
     end
     return gap
+end
+
+# Distance from (x, y) to the nearest wall [m] (0 off the map).
+function wall_distance(m::F1Tenth.MapData, x, y)
+    so, co = sincos(m.origin[3])
+    px, py = x - m.origin[1], y - m.origin[2]
+    col = floor(Int, (px * co + py * so) / m.resolution)
+    row = floor(Int, (-px * so + py * co) / m.resolution)
+    h, w = size(m.dt)
+    (0 <= col < w && 0 <= row < h) || return 0.0
+    return m.dt[row+1, col+1]
+end
+
+"""
+    arc_free(m, x, y, θ, κ, hw; limit=10) -> d
+
+The true free distance [m] along the arc of curvature κ leaving (x, y) in
+direction θ, keeping `hw` from the walls, over at most half a turn (and
+`limit`), from the map.
+"""
+function arc_free(m::F1Tenth.MapData, x, y, θ, κ, hw; limit=10.0)
+    limit = abs(κ) < 1e-6 ? limit : min(limit, π / abs(κ))
+    s = 0.0
+    while s < limit
+        if abs(κ) < 1e-6
+            px, py = x + s * cos(θ), y + s * sin(θ)
+        else
+            R = 1 / κ
+            px, py = x - R * sin(θ) + R * sin(θ + κ * s), y + R * cos(θ) - R * cos(θ + κ * s)
+        end
+        d = wall_distance(m, px, py) - hw
+        d <= 0 && return s
+        s += max(d, 0.02)   # an arc is at least as long as its chord
+    end
+    return limit
 end
 
 """
@@ -154,6 +204,8 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
     render && render!(env)
 
     t, dist, steps, scans, not_ok, min_gap = 0.0, 0.0, 0, 0, 0, Inf
+    close_time, min_ttc, low_ttc, max_slip, max_lat, optimistic, planned = 0.0, Inf, 0, 0.0, 0.0, 0, 0
+    agent, hw = env.sim.agents[1], params.width / 2
     sum_off, max_off, sum_e2, sum_ψ2 = 0.0, 0.0, 0.0, 0.0
     hint = 0
     last_scan, steer, v_cmd = -Inf, 0.0, 0.0
@@ -166,7 +218,10 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
     while obs.collisions[1] == 0 && obs.lap_counts[1] < laps && t < max_time
         x, y, θ = obs.poses_x[1], obs.poses_y[1], obs.poses_theta[1]
         v, r = obs.linear_vels_x[1], obs.ang_vels_z[1]
-        min_gap = min(min_gap, wall_gap(walls, x, y, θ, params.length, params.width))
+        gap = wall_gap(walls, x, y, θ, params.length, params.width)
+        min_gap = min(min_gap, gap)
+        max_slip = max(max_slip, abs(agent.state[7]))
+        max_lat = max(max_lat, abs(v * r))
 
         truth = path === nothing ? nothing : tracking_error(path, x, y, θ; hint, window=hint == 0 ? 0 : 30)
         truth === nothing || (hint = truth.segment)
@@ -181,6 +236,23 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
             push!(pending, (last_scan + controller.sweep + controller.latency, new_steer, new_speed))
             scans += 1
             lane.status === :ok || (not_ok += 1)
+            # time to collision if the car held the arc it is driving
+            turning = abs(v) > 0.5 ? r / abs(v) : 0.0
+            if v > 1.0
+                ttc = arc_free(walls, front_axle(x, y, θ, params.lf)..., θ, turning, hw) / v
+                min_ttc = min(min_ttc, ttc)
+                ttc < LOW_TTC && (low_ttc += 1)
+            end
+            # the free distance the speed was set for, against the true one
+            # (from where the scan was taken, along the same two arcs)
+            plan = controller.plan
+            if plan !== nothing
+                lx, ly, lθ = agent.scan_origin
+                fx, fy = front_axle(lx, ly, lθ, params.lf - env.lidar_dist)
+                true_free = max(arc_free(walls, fx, fy, lθ, turning, hw), arc_free(walls, fx, fy, lθ, plan.κ, hw))
+                planned += 1
+                min(plan.free, 10.0) > true_free + OPTIMISM && (optimistic += 1)
+            end
             if truth !== nothing
                 # the tracked lane against the true one, at the front axle
                 fa = tracking_error(path, front_axle(x, y, θ, params.lf)..., θ; hint, window=30)
@@ -200,6 +272,7 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
         end
 
         t += step_time
+        gap < CLOSE_GAP && (close_time += step_time)
         steps += 1
         dist += abs(v) * step_time
         if truth !== nothing   # score against the true centerline
@@ -212,19 +285,20 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
     known(x) = path === nothing ? NaN : x
     return RunResult(basename(string(map_name)), obs.lap_counts[1] >= laps && !crashed, crashed, t,
         known(sum_off / n), known(max_off), dist / max(t, eps()), known(sqrt(sum_e2 / ns)),
-        known(sqrt(sum_ψ2 / ns)), not_ok / ns, sum(values(controller.estimator.calls)) / ns, min_gap, time() - start)
+        known(sqrt(sum_ψ2 / ns)), not_ok / ns, sum(values(controller.estimator.calls)) / ns, min_gap, time() - start,
+        close_time / max(t, eps()), min_ttc, low_ttc / ns, max_slip, max_lat, optimistic / max(planned, 1))
 end
 
 function print_header()
-    @printf("%-14s %-8s %8s %7s %9s %9s %7s %9s %8s %8s %6s %7s\n", "map", "result", "time[s]", "v[m/s]",
-        "|off|[m]", "max|off|", "gap[m]", "e_err[m]", "ψe_err°", "not_ok%", "calls", "wall[s]")
+    @printf("%-14s %-8s %8s %7s %9s %9s %7s %9s %8s %8s %6s %7s %7s %7s\n", "map", "result", "time[s]", "v[m/s]",
+        "|off|[m]", "max|off|", "gap[m]", "e_err[m]", "ψe_err°", "not_ok%", "calls", "ttc[s]", "optim%", "wall[s]")
 end
 
 function print_result(r::RunResult)
     status = r.finished ? "lap" : r.crashed ? "CRASH" : "timeout"
-    @printf("%-14s %-8s %8.2f %7.2f %9.3f %9.3f %7.2f %9.3f %8.2f %8.1f %6.2f %7.1f\n", r.map, status, r.sim_time,
-        r.mean_speed, r.mean_offset, r.max_offset, r.min_gap, r.e_rmse, rad2deg(r.ψe_rmse), 100r.not_ok, r.calls,
-        r.wall_time)
+    @printf("%-14s %-8s %8.2f %7.2f %9.3f %9.3f %7.2f %9.3f %8.2f %8.1f %6.2f %7.2f %7.1f %7.1f\n", r.map, status,
+        r.sim_time, r.mean_speed, r.mean_offset, r.max_offset, r.min_gap, r.e_rmse, rad2deg(r.ψe_rmse), 100r.not_ok,
+        r.calls, r.min_ttc, 100r.optimistic, r.wall_time)
 end
 
 # ---------------------------------------------------------------------------
@@ -274,7 +348,7 @@ function parse_args(args)
     isempty(args) && (print(USAGE); exit(1))
     opts = Dict{Symbol,Any}(:map => args[1], :speed => nothing, :laps => 1, :pose => nothing,
         :map_ext => ".png", :render => false, :cloud => "roundrobin", :cloud_only => false, :cloud_latency => 25.0,
-        :cloud_drop => 0.0, :weights => DEFAULT_WEIGHTS)
+        :cloud_drop => 0.0, :weights => DEFAULT_WEIGHTS, :small => "small_weak")
     i = 2
     while i <= length(args)
         a = args[i]
@@ -298,6 +372,8 @@ function parse_args(args)
             opts[:cloud_drop] = parse(Float64, args[i+1]); i += 2
         elseif a == "--weights"
             opts[:weights] = args[i+1]; i += 2
+        elseif a == "--small"
+            opts[:small] = args[i+1]; i += 2
         else
             print(USAGE); error("unknown option $a")
         end
@@ -317,7 +393,7 @@ end
 
 function main(args=ARGS)
     o = parse_args(args)
-    nets = load_nets(o[:weights])
+    nets = load_nets(o[:weights]; small=Symbol(o[:small]))
     racer = (; nets, schedule=schedule_maker(o[:cloud]),
         selector=SelectorConfig(remote_latency=o[:cloud_latency] / 1000, remote_drop=o[:cloud_drop],
             use_small=!o[:cloud_only]))
