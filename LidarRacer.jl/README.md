@@ -118,61 +118,58 @@ from, and braking for it cost 5.5% of lap time. For the racetracks, the
 track's centerline file is used only to place the car on the start line and
 to score the run.
 
-### Results on the held-out tracks
+### Results on the held-out tracks: safety
 
 The networks never saw these five tracks (Spa, Monza, Silverstone,
-Oschersleben, YasMarina) in training. One lap each; mean lap time over the
-laps finished ([`scripts/results/compare.md`](scripts/results/compare.md)
-has every track):
+Oschersleben, YasMarina) in training. Every configuration ran one lap of
+each, 8 times (a seed sets the LiDAR's noise and where the lap starts): 40
+runs. Safety is measured from the true map and state. The full tables,
+with 95% confidence intervals, run-for-run differences against the car's
+networks alone, and lap times, are in
+[`scripts/results/compare-small_weak.md`](scripts/results/compare-small_weak.md)
+and [`scripts/results/compare-small_strong.md`](scripts/results/compare-small_strong.md);
+every run is in the CSVs beside them.
+
+**With `small_weak` on the car** (the default; the cloud runs `large`).
+Crashes in 40 runs:
 
 | Estimates from | Cloud calls per scan | 25 ms cloud latency | 50 ms | 100 ms |
 |---|---|---|---|---|
-| the true values (an upper bound) | – | 74.02 s | | |
-| the hand-written estimator (`main` branch) | – | 74.64 s | | |
-| small networks only | 0 | 75.78 s | 75.78 s | 75.78 s |
-| large networks only (the cloud alone) | 6 | 75.65 s | 77.08 s | 80.11 s, **4 of 5** (one crash) |
-| small, and large for every estimate | 6 | 75.56 s | 75.60 s | 75.71 s |
-| small, and large in turn (round robin) | 1 | 75.73 s | 75.74 s | 75.76 s |
-| small, and large far ahead (κ_profile, widths, sight) | 3 | 75.55 s | 75.59 s | 75.69 s |
+| the car's networks only | 0 | 8 | 8 | 8 |
+| the cloud's only | 6 | **0** | **0** | 6 |
+| the car's, and the cloud's for every estimate | 6 | 7 | 2 | **0** |
+| the car's, and the cloud's in turn (round robin) | 1 | 4 | 2 | 4 |
+| the car's, and the cloud's far ahead (κ_profile, widths, sight) | 3 | 3 | **0** | 1 |
 
-Every other configuration finishes every lap.
+- At 25 ms the cloud alone is the safest: the car's weak estimates, used
+  at once, cost more than the cloud's one-scan delay.
+- At 50 ms (a public cloud over 5G) the car's networks with the cloud's far
+  ahead are as safe as the cloud alone (no crashes, the same 0.10 m
+  closest approach), with half the calls and fewer scans planning on too
+  much free distance (3.9% against 4.9%); both are far safer than the car
+  alone.
+- At 100 ms a combination is safer than either tier alone: the car's
+  networks with the cloud's for every estimate never crashed, against 6
+  (the cloud alone) and 8 (the car alone).
 
-- **The cloud alone degrades with its latency.** Its heading error, at
-  1.65° (RMS) at 25 ms, is 2.85° at 100 ms, and it crashes once.
-- **With the small networks always on, latency hardly matters.** The cloud
-  results improve on them a little (about 0.3% here) and arrive late without
-  harm, since the small result for each scan is used at once.
-- **Calling the cloud only for the estimates far ahead** does as well as
-  calling it for all of them, with half the calls.
-- On these tracks the small networks are already accurate enough that the
-  gain from the cloud is small; the speed is limited mostly by how far ahead
-  the lane is seen and the 2.5 m/s² braking. The true estimates are 2.3%
-  faster than the small networks.
+No fixed configuration is the safest at every latency, which is the case
+for switching by latency (a `CloudSchedule` that reads it).
 
-Safety, from the true map and state (worst case over the five tracks;
-fractions are means over the tracks):
+**With `small_strong` on the car**, the car's networks alone never crash;
+the cloud alone is again the safest at 25 ms and crashes 6 times at 100 ms,
+and keeping the car's networks on is the safest from 50 ms on.
 
-| Estimates from | Cloud latency | Crashes | Closest to a wall | Time within 0.2 m of a wall | Least time to collision | Scans with time to collision under 0.5 s | Largest slip angle |
-|---|---|---|---|---|---|---|---|
-| small networks only | – | 0 | 0.19 m | 0.10% | 0.36 s | 0.10% | 6.4° |
-| large networks only | 25 ms | 0 | 0.19 m | 0.04% | 0.46 s | 0.02% | 4.7° |
-| large networks only | 50 ms | 0 | 0.10 m | 0.17% | 0.26 s | 0.15% | 5.0° |
-| large networks only | 100 ms | **1** | 0.10 m | **0.57%** | **0.19 s** | **1.28%** | **7.3°** |
-| small, and large far ahead | 25–100 ms | 0 | 0.16–0.19 m | 0.07–0.16% | 0.31–0.34 s | 0.08–0.14% | 5.3–6.3° |
-| small, and large for every estimate | 25–100 ms | 0 | 0.14–0.19 m | 0.04–0.19% | 0.33–0.34 s | 0.09–0.12% | 5.2–6.0° |
+In about 4–5% of scans, in every configuration, the speed is set for a free
+distance ahead more than 0.25 m longer than the true one (the clearance
+networks' errors are biased toward too much room; see LidarLaneNets.jl).
 
-With fresh cloud results (25 ms) the large networks alone are the safest;
-as the cloud slows, they become the least safe by every measure, while the
-configurations that keep the small networks on stay where the small
-networks alone are. In about 5% of scans, in every configuration, the speed
-is set for a free distance ahead more than 0.25 m longer than the true one;
-the cloud's clearance network lowers that only slightly (5.0% to 4.7%).
-These are single laps with one LiDAR noise seed, so differences of a few
-hundredths of a percent are noise.
+Lap times barely differ between configurations that finish (within about
+2%; the true estimates give 74.0 s on average, against about 75–78 s here).
 
-The hand-written estimator's lap times come from its own planner (on
-`main`, which plans out to 10 m from the scan's points; here the profiles
-reach 8 m), so the comparison with it is approximate.
+For reference, the hand-written estimator on `main` laps these tracks in
+74.6 s on average (one seed), with its own planner, which plans out to 10 m
+from the scan's points (here the profiles reach 8 m), so the comparison is
+approximate.
 
 The planner, Stanley and speed settings were tuned with the hand-written
 estimator on `main` (on 12 racetracks, checked on the other 11) and are
