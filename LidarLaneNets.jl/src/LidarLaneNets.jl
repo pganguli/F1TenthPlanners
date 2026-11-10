@@ -28,7 +28,8 @@ using Statistics
 
 export PROFILE_STEP, PROFILE_LENGTH, PROFILE_S, CLEARANCE_K, RANGE_MAX, SIGHT_MAX, CLEARANCE_MAX, WIDTH_MAX
 export ESTIMATES, output_size, LaneLabels, lane_labels, w_left, w_right
-export TIERS, EstimatorNet, build_model, large_from_small, scan_features, scan_features!, input_size, predict
+export TIERS, NETWORKS, SMALL_STRONG_SPEC, SMALL_WEAK_SPEC, network_tier, network_spec, EstimatorNet, build_model, large_from_small, scan_features, scan_features!
+export input_size, input_stride, beam_stride, predict
 export save_net, load_net, load_nets, weights_file
 export Measurement, SelectorConfig, TieredEstimator, observe!, set_schedule!
 export CloudSchedule, cloud_calls, NoCalls, AllCalls, FixedCalls, RoundRobin

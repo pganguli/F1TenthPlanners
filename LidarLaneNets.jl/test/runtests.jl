@@ -65,16 +65,28 @@ end
         @test big.tier === :large && big.y_std == small.y_std
         @test predict(big, x) == predict(small, x)
         @test_throws ArgumentError large_from_small(big)
+        # other small shapes: the weak one takes every 8th beam, and survives saving
+        weak = EstimatorNet(:e, :small, NB; spec=SMALL_WEAK_SPEC, rng=Xoshiro(10))
+        @test input_stride(weak) == 8 && input_size(weak) == 136
+        wl = large_from_small(weak; rng=Xoshiro(11))
+        @test input_stride(wl) == 1 && wl.spec == SMALL_WEAK_SPEC && predict(wl, x) == predict(weak, x)
+        wl2 = load_net(save_net(tempname() * ".jld2", wl))
+        @test wl2.spec == SMALL_WEAK_SPEC && predict(wl2, x) == predict(wl, x)
 
         dir = mktempdir()
-        for tier in TIERS, est in ESTIMATES
-            save_net(weights_file(dir, est, tier), EstimatorNet(est, tier, NB; rng=Xoshiro(5)))
+        for name in NETWORKS, est in ESTIMATES
+            save_net(weights_file(dir, est, name),
+                EstimatorNet(est, network_tier(name), NB; spec=network_spec(name), rng=Xoshiro(5)))
         end
-        nets = load_nets(dir)
+        nets = load_nets(dir)   # small_weak on the car, large in the cloud
+        @test nets.small.e.spec == SMALL_WEAK_SPEC && nets.large.e.spec == SMALL_STRONG_SPEC
+        @test load_nets(dir; small=:small_strong).small.sight.spec == SMALL_STRONG_SPEC
+        @test_throws ArgumentError load_nets(dir; small=:large)
         @test keys(nets) == TIERS && keys(nets.small) == ESTIMATES
         x = rand(Xoshiro(6), NB) .* 8
         @test predict(nets.large.ψe, x) == predict(EstimatorNet(:ψe, :large, NB; rng=Xoshiro(5)), x)
-        @test keys(load_nets(dir; tiers=(:small,))) == (:small,)
+        @test keys(load_nets(dir; large=nothing)) == (:small,)
+        @test basename(weights_file(dir, :ψe, :small_weak)) == "small_weak_psi_e.jld2"
     end
 
     @testset "cloud schedules" begin

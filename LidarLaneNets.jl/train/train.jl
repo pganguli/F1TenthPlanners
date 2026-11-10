@@ -16,9 +16,14 @@
 # On a GPU: if LuxCUDA (NVIDIA), AMDGPU (AMD) or Metal (Apple) is installed in
 # this environment, it is loaded and used; otherwise the CPU.
 #
-#     julia -t auto --project=. train.jl                  # every estimate, both tiers
-#     julia -t auto --project=. train.jl small            # one tier
-#     julia -t auto --project=. train.jl large e ψe       # one tier, some estimates
+#     julia -t auto --project=. train.jl                    # every network set (small_weak, small_strong, large)
+#     julia -t auto --project=. train.jl small_weak         # one set
+#     julia -t auto --project=. train.jl large e ψe         # one set, some estimates
+#
+# The sets are LidarLaneNets.NETWORKS, saved to ../weights/<set>_<estimate>.jld2.
+# A large network starts from the trained small_strong one, so train that
+# first. small_weak (for the car) is used with the same large networks (for
+# the cloud): the cloud needs only the scan.
 
 using JLD2
 using LidarLaneNets
@@ -65,10 +70,11 @@ function load_split(names)
     return X, Y
 end
 
-function features(X::AbstractMatrix, tier)
-    F = Matrix{Float32}(undef, input_size(tier, size(X, 1)), size(X, 2))
+function features(X::AbstractMatrix, name::Symbol)
+    stride = beam_stride(network_tier(name); spec=network_spec(name))
+    F = Matrix{Float32}(undef, cld(size(X, 1), stride), size(X, 2))
     Threads.@threads for j in axes(X, 2)
-        scan_features!(F, view(X, :, j), tier, j)
+        scan_features!(F, view(X, :, j), stride, j)
     end
     return F
 end
@@ -116,16 +122,17 @@ function evaluate(model, ps, st, F, Yn, dev)
     return se / n
 end
 
-function train_one(est, tier, Ftr, Ytr, Fva, Yva; dev, epochs, rng=Xoshiro(42))
-    size(Ftr, 1) == input_size(tier, 1081) || error("expected features of 1081 beams")
+function train_one(est, name, Ftr, Ytr, Fva, Yva; dev, epochs, rng=Xoshiro(42))
+    tier, spec = network_tier(name), network_spec(name)
+    size(Ftr, 1) == input_size(tier, 1081; spec) || error("expected features of 1081 beams")
     if tier === :small
         both = hcat(Ytr, mirror!(est, copy(Ytr)))   # normalize over the data and its mirror image
         y_mean = vec(mean(both; dims=2))
         y_std = max.(vec(std(both; dims=2)), 1f-3)
-        net = EstimatorNet(est, tier, 1081; rng, y_mean, y_std)
+        net = EstimatorNet(est, tier, 1081; spec, rng, y_mean, y_std)
     else
         # the trained small network, plus a correction that starts at zero
-        net = large_from_small(load_net(weights_file(WEIGHTS_DIR, est, :small)); rng)
+        net = large_from_small(load_net(weights_file(WEIGHTS_DIR, est, :small_strong)); rng)
         y_mean, y_std = net.y_mean, net.y_std
     end
     norm(Y) = (Y .- y_mean) ./ y_std
@@ -137,7 +144,7 @@ function train_one(est, tier, Ftr, Ytr, Fva, Yva; dev, epochs, rng=Xoshiro(42))
     # (copies: on the CPU, cpu_device returns the training's own arrays, which
     # the optimizer keeps changing)
     best, best_ps, best_epoch = evaluate(net.model, ts.parameters, ts.states, Fva, Yn_va, dev), deepcopy(net.ps), 0
-    tier === :large && @printf("  %-6s %-10s epoch  0  (the small network)  val mse %.5f\n", tier, est, best)
+    tier === :large && @printf("  %-12s %-10s epoch  0  (the small network)  val mse %.5f\n", name, est, best)
     N = size(Ftr, 2)
     steps = epochs * cld(N, BATCH)
     k = 0
@@ -162,20 +169,21 @@ function train_one(est, tier, Ftr, Ytr, Fva, Yva; dev, epochs, rng=Xoshiro(42))
             best, best_epoch = val, epoch
             best_ps = deepcopy(cpu_device()(ts.parameters))
         end
-        @printf("  %-6s %-10s epoch %2d  train mse %.5f  val mse %.5f  (%.0f s)\n", tier, est, epoch,
+        @printf("  %-12s %-10s epoch %2d  train mse %.5f  val mse %.5f  (%.0f s)\n", name, est, epoch,
             train_mse / N, val, time() - t0)
         flush(stdout)
     end
-    trained = EstimatorNet(est, tier, 1081, net.model, best_ps, cpu_device()(ts.states), y_mean, y_std)
+    trained = EstimatorNet(est, tier, 1081, net.spec, net.model, best_ps, cpu_device()(ts.states), y_mean, y_std)
     mkpath(WEIGHTS_DIR)
-    save_net(weights_file(WEIGHTS_DIR, est, tier), trained)
-    @printf("  %-6s %-10s kept epoch %d (val mse %.5f)\n", tier, est, best_epoch, best)
+    save_net(weights_file(WEIGHTS_DIR, est, name), trained)
+    @printf("  %-12s %-10s kept epoch %d (val mse %.5f)\n", name, est, best_epoch, best)
     return trained
 end
 
 function main(args=ARGS)
-    tiers = isempty(args) || !(args[1] in ("small", "large")) ? collect(TIERS) : [Symbol(args[1])]
-    rest = isempty(args) ? String[] : args[(args[1] in ("small", "large") ? 2 : 1):end]
+    names = String.(NETWORKS)
+    sets = isempty(args) || !(args[1] in names) ? collect(NETWORKS) : [Symbol(args[1])]
+    rest = isempty(args) ? String[] : args[(args[1] in names ? 2 : 1):end]
     ests = isempty(rest) ? collect(ESTIMATES) : Symbol.(rest)
     dev = gpu_device()
     BLAS.set_num_threads(Threads.nthreads())
@@ -184,10 +192,10 @@ function main(args=ARGS)
     Xva, Yva = load_split(VAL_TRACKS)
     println("train: $(size(Xtr, 2)) scans from $(length(TRAIN_TRACKS)) tracks; validation: $(size(Xva, 2)) from ",
         join(VAL_TRACKS, ", "))
-    for tier in tiers
-        Ftr, Fva = features(Xtr, tier), features(Xva, tier)
+    for name in sets
+        Ftr, Fva = features(Xtr, name), features(Xva, name)
         for est in ests
-            train_one(est, tier, Ftr, Ytr[est], Fva, Yva[est]; dev, epochs=EPOCHS[tier])
+            train_one(est, name, Ftr, Ytr[est], Fva, Yva[est]; dev, epochs=EPOCHS[network_tier(name)])
         end
     end
 end

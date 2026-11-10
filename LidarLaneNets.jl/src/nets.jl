@@ -4,8 +4,9 @@
 """
     TIERS
 
-`:small` runs on the car: every 4th beam, three thin convolutions (each
-output sees about 29° of the scan). `:large` runs in the cloud: the small
+`:small` runs on the car: three thin convolutions over every few beams
+(shapes in [`SMALL_STRONG_SPEC`](@ref); the trained sets in
+[`NETWORKS`](@ref)). `:large` runs in the cloud: the small
 network plus a correction from every beam (six wider convolutions, each
 output seeing about 63°, and a wider head). The correction starts at zero,
 so a large network starts out as its small one and is trained from there:
@@ -13,44 +14,77 @@ it is never less accurate on the validation tracks.
 """
 const TIERS = (:small, :large)
 
-beam_stride(tier::Symbol) = tier === :small ? 4 : tier === :large ? 1 : throw(ArgumentError("unknown tier $tier"))
+"""
+    SMALL_STRONG_SPEC, SMALL_WEAK_SPEC
 
-input_size(tier::Symbol, num_beams::Integer) = cld(num_beams, beam_stride(tier))
+The shape of a small network (and of a large one's small part): which beams
+it takes (`stride`: every `stride`-th), its three convolutions' channels and
+its dense layer's width. `SMALL_WEAK_SPEC` has half the beams and half the
+channels of `SMALL_STRONG_SPEC`.
+"""
+const SMALL_STRONG_SPEC = (stride=4, channels=(8, 16, 16), dense=64)
+const SMALL_WEAK_SPEC = (stride=8, channels=(4, 8, 8), dense=32)
 
 """
-    scan_features(ranges, tier) -> Vector{Float32}
+    NETWORKS
 
-A scan as a network's input: the beams the tier uses, each range clipped to
-`RANGE_MAX` (anything out of range or invalid reads as `RANGE_MAX`) and
-divided by it.
+The trained network sets, named as their weight files are (`weights/<name>_<estimate>.jld2`):
+
+- `:small_weak`: small networks of `SMALL_WEAK_SPEC`, for the car (the edge);
+- `:small_strong`: small networks of `SMALL_STRONG_SPEC`, for comparison;
+- `:large`: large networks for the cloud; each is a `:small_strong` network
+  plus a correction.
+
+[`load_nets`](@ref) pairs `:small_weak` with `:large` by default.
 """
-function scan_features(ranges::AbstractVector{<:Real}, tier::Symbol)
-    s = beam_stride(tier)
-    return Float32[_feature(ranges[i]) for i in 1:s:length(ranges)]
-end
+const NETWORKS = (:small_weak, :small_strong, :large)
+
+network_tier(name::Symbol) = name === :large ? :large :
+                             name in (:small_weak, :small_strong) ? :small : throw(ArgumentError("unknown network set $name"))
+network_spec(name::Symbol) = name === :small_weak ? SMALL_WEAK_SPEC : SMALL_STRONG_SPEC
+
+beam_stride(tier::Symbol; spec=SMALL_STRONG_SPEC) =
+    tier === :small ? spec.stride : tier === :large ? 1 : throw(ArgumentError("unknown tier $tier"))
+
+input_size(tier::Symbol, num_beams::Integer; spec=SMALL_STRONG_SPEC) = cld(num_beams, beam_stride(tier; spec))
 
 """
-    scan_features!(X, ranges, tier, j) -> X
+    scan_features(ranges, stride) -> Vector{Float32}
+    scan_features(ranges, tier)
+
+A scan as a network's input: every `stride`-th beam (by default, the beams
+`tier` uses), each range clipped to `RANGE_MAX` (anything out of range or
+invalid reads as `RANGE_MAX`) and divided by it.
+"""
+scan_features(ranges::AbstractVector{<:Real}, stride::Integer) =
+    Float32[_feature(ranges[i]) for i in 1:stride:length(ranges)]
+scan_features(ranges::AbstractVector{<:Real}, tier::Symbol) = scan_features(ranges, beam_stride(tier))
+
+"""
+    scan_features!(X, ranges, stride, j) -> X
+    scan_features!(X, ranges, tier, j)
 
 Write a scan's features into column `j` of `X`.
 """
-function scan_features!(X::AbstractMatrix{Float32}, ranges::AbstractVector{<:Real}, tier::Symbol, j::Integer)
-    s = beam_stride(tier)
-    for (k, i) in enumerate(1:s:length(ranges))
+function scan_features!(X::AbstractMatrix{Float32}, ranges::AbstractVector{<:Real}, stride::Integer, j::Integer)
+    for (k, i) in enumerate(1:stride:length(ranges))
         X[k, j] = _feature(ranges[i])
     end
     return X
 end
+scan_features!(X::AbstractMatrix{Float32}, ranges::AbstractVector{<:Real}, tier::Symbol, j::Integer) =
+    scan_features!(X, ranges, beam_stride(tier), j)
 
 _feature(r::Real) = Float32(0 < r <= RANGE_MAX ? r / RANGE_MAX : 1.0)
 
 # A convolution that halves the length (odd kernel, "same" padding, stride 2).
 _halve(k, ch, act=relu) = Conv((k,), ch, act; stride=2, pad=(k - 1) ÷ 2)
 
-function _small_model(n_in, n_out)
+function _small_model(n_in, n_out, spec)
     L = cld(cld(cld(n_in, 2), 2), 2)
-    return Chain(_halve(5, 1 => 8), _halve(5, 8 => 16), _halve(5, 16 => 16), FlattenLayer(),
-        Dense(16L => 64, relu), Dense(64 => 2n_out))
+    c1, c2, c3 = spec.channels
+    return Chain(_halve(5, 1 => c1), _halve(5, c1 => c2), _halve(5, c2 => c3), FlattenLayer(),
+        Dense(c3 * L => spec.dense, relu), Dense(spec.dense => 2n_out))
 end
 
 # The large network's correction to the small one, from every beam; its last
@@ -65,19 +99,25 @@ function _correction(n_in, n_out)
         Dense(256 => 128, relu), Dense(128 => 2n_out; init_weight=zeros32, init_bias=zeros32))
 end
 
-_every_4th(x) = x[1:beam_stride(:small):end, :, :]
+# Every k-th beam of a batch of scans.
+struct _EveryKth <: Function
+    k::Int
+end
+(f::_EveryKth)(x) = x[1:f.k:end, :, :]
 
 """
-    build_model(tier, n_in, n_out) -> Lux model
+    build_model(tier, n_in, n_out; spec=SMALL_STRONG_SPEC) -> Lux model
 
 The network for one estimate: input `(n_in, 1, batch)`, output
 `(2n_out, batch)`: the normalized mean, then the log standard deviation.
-The large one is the small one (on every 4th of its beams) plus a
-correction: `layer_1.layer_2` of its parameters is a small network's.
+`spec` shapes the small network (see [`SMALL_STRONG_SPEC`](@ref)). The large one is
+the small one (on every `spec.stride`-th of its beams) plus a correction:
+`layer_1.layer_2` of its parameters is a small network's.
 """
-function build_model(tier::Symbol, n_in::Integer, n_out::Integer)
-    tier === :small && return _small_model(n_in, n_out)
-    tier === :large && return Parallel(+, Chain(WrappedFunction(_every_4th), _small_model(cld(n_in, 4), n_out)),
+function build_model(tier::Symbol, n_in::Integer, n_out::Integer; spec=SMALL_STRONG_SPEC)
+    tier === :small && return _small_model(n_in, n_out, spec)
+    tier === :large && return Parallel(+,
+        Chain(WrappedFunction(_EveryKth(spec.stride)), _small_model(cld(n_in, spec.stride), n_out, spec)),
         _correction(n_in, n_out))
     throw(ArgumentError("unknown tier $tier"))
 end
@@ -88,13 +128,15 @@ const LOGσ_MIN, LOGσ_MAX = -6.0f0, 3.0f0
 """
     EstimatorNet
 
-A trained network for one estimate and tier: the model, its parameters and
+A trained network for one estimate and tier: the shape of its small
+network (`spec`, see [`SMALL_STRONG_SPEC`](@ref)), the model, its parameters and
 state, and the mean and standard deviation the targets were normalized by.
 """
 struct EstimatorNet{M,P,S}
     estimate::Symbol
     tier::Symbol
     num_beams::Int
+    spec::NamedTuple{(:stride, :channels, :dense),Tuple{Int,NTuple{3,Int},Int}}
     model::M
     ps::P
     st::S
@@ -103,16 +145,30 @@ struct EstimatorNet{M,P,S}
 end
 
 """
-    EstimatorNet(estimate, tier, num_beams; rng, y_mean, y_std)
+    EstimatorNet(estimate, tier, num_beams; spec=SMALL_STRONG_SPEC, rng, y_mean, y_std)
 
 An untrained network, with fresh parameters drawn from `rng`.
 """
-function EstimatorNet(estimate::Symbol, tier::Symbol, num_beams::Integer; rng::AbstractRNG=Random.default_rng(),
-                      y_mean=zeros(Float32, output_size(estimate)), y_std=ones(Float32, output_size(estimate)))
-    model = build_model(tier, input_size(tier, num_beams), output_size(estimate))
+function EstimatorNet(estimate::Symbol, tier::Symbol, num_beams::Integer; spec=SMALL_STRONG_SPEC,
+                      rng::AbstractRNG=Random.default_rng(), y_mean=zeros(Float32, output_size(estimate)),
+                      y_std=ones(Float32, output_size(estimate)))
+    model = build_model(tier, input_size(tier, num_beams; spec), output_size(estimate); spec)
     ps, st = Lux.setup(rng, model)
-    return EstimatorNet(estimate, tier, Int(num_beams), model, ps, st, Float32.(y_mean), Float32.(y_std))
+    return EstimatorNet(estimate, tier, Int(num_beams), _spec(spec), model, ps, st, Float32.(y_mean),
+        Float32.(y_std))
 end
+
+_spec(s) = (stride=Int(s.stride), channels=NTuple{3,Int}(s.channels), dense=Int(s.dense))
+
+"""
+    input_stride(net) -> k
+
+The network takes every `k`-th beam: its small network's stride, or 1 for a
+large network.
+"""
+input_stride(net::EstimatorNet) = beam_stride(net.tier; spec=net.spec)
+
+input_size(net::EstimatorNet) = cld(net.num_beams, input_stride(net))
 
 """
     large_from_small(small::EstimatorNet; rng) -> EstimatorNet
@@ -122,10 +178,11 @@ parameters and normalization; its correction is zero), to be trained from.
 """
 function large_from_small(small::EstimatorNet; rng::AbstractRNG=Random.default_rng())
     small.tier === :small || throw(ArgumentError("need a small network"))
-    net = EstimatorNet(small.estimate, :large, small.num_beams; rng, y_mean=small.y_mean, y_std=small.y_std)
+    net = EstimatorNet(small.estimate, :large, small.num_beams; spec=small.spec, rng, y_mean=small.y_mean,
+        y_std=small.y_std)
     ps = merge(net.ps, (; layer_1=merge(net.ps.layer_1, (; layer_2=small.ps))))
     st = merge(net.st, (; layer_1=merge(net.st.layer_1, (; layer_2=small.st))))
-    return EstimatorNet(net.estimate, :large, net.num_beams, net.model, ps, st, net.y_mean, net.y_std)
+    return EstimatorNet(net.estimate, :large, net.num_beams, net.spec, net.model, ps, st, net.y_mean, net.y_std)
 end
 
 """
@@ -148,7 +205,7 @@ end
 The estimate from one scan, as vectors.
 """
 function predict(net::EstimatorNet, ranges::AbstractVector{<:Real})
-    μ, σ = predict(net, reshape(scan_features(ranges, net.tier), :, 1))
+    μ, σ = predict(net, reshape(scan_features(ranges, input_stride(net)), :, 1))
     return Float64.(vec(μ)), Float64.(vec(σ))
 end
 
@@ -156,16 +213,22 @@ end
 const _FILE_NAMES = Dict(:e => "e", :ψe => "psi_e", :κ_profile => "kappa_profile", :widths => "widths",
     :sight => "sight", :clearance => "clearance")
 
-weights_file(dir, estimate::Symbol, tier::Symbol) = joinpath(dir, "$(tier)_$(_FILE_NAMES[estimate]).jld2")
+"""
+    weights_file(dir, estimate, name) -> path
+
+Where the network for `estimate` of the set `name` (see [`NETWORKS`](@ref)) is saved.
+"""
+weights_file(dir, estimate::Symbol, name::Symbol) = joinpath(dir, "$(name)_$(_FILE_NAMES[estimate]).jld2")
 
 """
     save_net(path, net)
 
-Save a network's parameters, state and normalization (on the CPU).
+Save a network's shape, parameters, state and normalization (on the CPU).
 """
 function save_net(path::AbstractString, net::EstimatorNet)
     cpu = cpu_device()
     jldsave(path; estimate=String(net.estimate), tier=String(net.tier), num_beams=net.num_beams,
+        spec_stride=net.spec.stride, spec_channels=collect(net.spec.channels), spec_dense=net.spec.dense,
         ps=cpu(net.ps), st=cpu(net.st), y_mean=net.y_mean, y_std=net.y_std)
     return path
 end
@@ -173,21 +236,29 @@ end
 """
     load_net(path) -> EstimatorNet
 
-A network saved by [`save_net`](@ref), on the CPU.
+A network saved by [`save_net`](@ref), on the CPU. (Files without a shape
+are `SMALL_STRONG_SPEC`.)
 """
 function load_net(path::AbstractString)
     d = load(path)
     est, tier = Symbol(d["estimate"]), Symbol(d["tier"])
-    model = build_model(tier, input_size(tier, d["num_beams"]), output_size(est))
-    return EstimatorNet(est, tier, d["num_beams"], model, d["ps"], d["st"], d["y_mean"], d["y_std"])
+    spec = haskey(d, "spec_stride") ?
+           _spec((stride=d["spec_stride"], channels=Tuple(d["spec_channels"]), dense=d["spec_dense"])) : SMALL_STRONG_SPEC
+    model = build_model(tier, input_size(tier, d["num_beams"]; spec), output_size(est); spec)
+    return EstimatorNet(est, tier, d["num_beams"], spec, model, d["ps"], d["st"], d["y_mean"], d["y_std"])
 end
 
 """
-    load_nets(dir; tiers=TIERS) -> NamedTuple
+    load_nets(dir; small=:small_weak, large=:large) -> NamedTuple
 
-Every network in `dir`, as `(small=(e=…, ψe=…, …), large=(…))`.
+The networks in `dir` for the car (`small`) and the cloud (`large`; `nothing`
+for none), as `(small=(e=…, ψe=…, …), large=(…))`: by default the weak small
+set on the car and the large set in the cloud (see [`NETWORKS`](@ref)).
 """
-function load_nets(dir::AbstractString; tiers=TIERS)
-    load_tier(t) = NamedTuple{ESTIMATES}(Tuple(load_net(weights_file(dir, est, t)) for est in ESTIMATES))
-    return NamedTuple{Tuple(tiers)}(Tuple(load_tier(t) for t in tiers))
+function load_nets(dir::AbstractString; small::Symbol=:small_weak, large::Union{Symbol,Nothing}=:large)
+    load_set(name) = NamedTuple{ESTIMATES}(Tuple(load_net(weights_file(dir, est, name)) for est in ESTIMATES))
+    network_tier(small) === :small || throw(ArgumentError("$small is not a small network set"))
+    large === nothing && return (small=load_set(small),)
+    network_tier(large) === :large || throw(ArgumentError("$large is not a large network set"))
+    return (small=load_set(small), large=load_set(large))
 end
