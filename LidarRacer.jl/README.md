@@ -84,7 +84,16 @@ julia --project=scripts scripts/race.jl Spa --render      # watch it
 julia -t auto --project=scripts scripts/race.jl all       # all 23 racetracks, in parallel
 julia --project=scripts scripts/race.jl Spa --speed 3     # cap the speed
 julia --project=scripts scripts/race.jl path/to/map --pose X Y THETA
+julia -t auto --project=scripts scripts/race.jl test --cloud none    # held-out tracks, small networks only
+julia --project=scripts scripts/race.jl Spa --cloud all --cloud-only --cloud-latency 100
+julia -t auto --project=scripts scripts/compare.jl 50 100           # every configuration (results/compare.md)
 ```
+
+`--cloud` picks when to call the cloud's large networks (`none`, `all`,
+`roundrobin` (the default), or a list of estimates to call every scan);
+`--cloud-only` drops the small networks; `--cloud-latency` (ms, default 25)
+and `--cloud-drop` set the simulated network. The weights come from
+`../LidarLaneNets.jl/weights` (Git LFS).
 
 The controller runs on each new scan (every 25 ms). Each command takes
 effect 7.5 ms after its scan is published. That covers computing it and
@@ -92,9 +101,8 @@ passing it on: it is ForzaETH's measured latency for their whole race stack
 on NUC5's computer, a cautious value for this lighter controller. The
 command is held until the next one and goes to the car's own low-level
 controllers (in F1Tenth.jl). The simulator steps every 2.5 ms, so that
-latency is timed closely. The controller tolerates up to 75 ms of latency
-(laps 2.8% slower at 50 ms, 7.5% at 75 ms); at 100 ms it starts to hit
-walls.
+latency is timed closely. (The cloud's latency is separate: it delays only
+the cloud's results, which the Kalman filter puts at their own scan.)
 
 There is no cruise speed. The speed is the fastest from which the car,
 braking at the command limiter's 2.5 m/s² after a two-scan delay, reaches
@@ -109,23 +117,45 @@ from, and braking for it cost 5.5% of lap time. For the racetracks, the
 track's centerline file is used only to place the car on the start line and
 to score the run.
 
-Every run on the 23 f1tenth_racetracks maps finishes a lap, at average
-speeds of 5.1–6.3 m/s, with the car's body at least 0.23 m from the walls.
-The speed is limited mostly by how far ahead the LiDAR sees the lane and the
-2.5 m/s² braking, more than by grip.
+### Results on the held-out tracks
 
-The settings come from the car or the sensor where they can (wheelbase,
-width, steering and braking limits, scan rate, the LiDAR's 10 m detection
-range), are measured where they can't (the filter's scan noise, from the
-scan's errors against the true lane center), and the rest (Stanley's gains,
-the filter's process noise, the gap that ends a wall) were tuned on 12
-racetracks with two LiDAR noise seeds each, then checked on the other 11:
-every lap there finished too, with the same mean wall clearance (0.50 m
-against 0.48 m). Each tuned value sits in the middle of a range of values
-that all finish every lap. The remaining perception and filter settings
-changed nothing measurable on these tracks and keep their defaults. See the
-comments at `default_stanley`, `default_perception` and `default_smoothing`
-in `src/LidarRacer.jl`.
+The networks never saw these five tracks (Spa, Monza, Silverstone,
+Oschersleben, YasMarina) in training. One lap each; mean lap time over the
+laps finished ([`scripts/results/compare.md`](scripts/results/compare.md)
+has every track):
+
+| Estimates from | Cloud calls per scan | 25 ms cloud latency | 50 ms | 100 ms |
+|---|---|---|---|---|
+| the true values (an upper bound) | – | 74.02 s | | |
+| the hand-written estimator (`main` branch) | – | 74.64 s | | |
+| small networks only | 0 | 75.78 s | 75.78 s | 75.78 s |
+| large networks only (the cloud alone) | 6 | 75.65 s | 77.08 s | 80.11 s, **4 of 5** (one crash) |
+| small, and large for every estimate | 6 | 75.56 s | 75.60 s | 75.71 s |
+| small, and large in turn (round robin) | 1 | 75.73 s | 75.74 s | 75.76 s |
+| small, and large far ahead (κ_profile, widths, sight) | 3 | 75.55 s | 75.59 s | 75.69 s |
+
+Every other configuration finishes every lap.
+
+- **The cloud alone degrades with its latency.** Its heading error, at
+  1.65° (RMS) at 25 ms, is 2.85° at 100 ms, and it crashes once.
+- **With the small networks always on, latency hardly matters.** The cloud
+  results improve on them a little (about 0.3% here) and arrive late without
+  harm, since the small result for each scan is used at once.
+- **Calling the cloud only for the estimates far ahead** does as well as
+  calling it for all of them, with half the calls.
+- On these tracks the small networks are already accurate enough that the
+  gain from the cloud is small; the speed is limited mostly by how far ahead
+  the lane is seen and the 2.5 m/s² braking. The true estimates are 2.3%
+  faster than the small networks.
+
+The hand-written estimator's lap times come from its own planner (on
+`main`, which plans out to 10 m from the scan's points; here the profiles
+reach 8 m), so the comparison with it is approximate.
+
+The planner, Stanley and speed settings were tuned with the hand-written
+estimator on `main` (on 12 racetracks, checked on the other 11) and are
+kept. The Kalman filter's process noise is the same; its measurement noise
+is each network's own standard deviation for each scan.
 
 ## Tests
 
@@ -133,4 +163,5 @@ in `src/LidarRacer.jl`.
 julia --project=. -e 'import Pkg; Pkg.test()'
 ```
 
-The tests use synthetic scans and don't need F1Tenth.jl.
+The tests use synthetic lane states and untrained networks, and need
+neither F1Tenth.jl nor the trained weights.
