@@ -29,6 +29,7 @@ using LidarLaneNets
 using LidarRacer
 using StanleyController: Path, tracking_error, front_axle, wrap_angle
 using Printf
+using Random: Xoshiro
 
 const DEFAULT_WEIGHTS = joinpath(@__DIR__, "..", "..", "LidarLaneNets.jl", "weights")
 # The racetracks the networks never saw in training (as in LidarLaneNets.jl/train/truth.jl).
@@ -183,7 +184,8 @@ and any other keywords (`selector`, `tracking`, `stanley`, `margin`,
 `latency`, `k_σ`) replace the Racer's defaults. `tracking` defaults to
 the noise measured for the default networks (weights/fusion.toml).
 `timestep` is the simulator's step [s] (it also sets how precisely a
-command's latency is timed), and `seed` seeds the LiDAR noise. With `render`,
+command's latency is timed), and `seed` seeds the LiDAR noise and the
+simulated network's dropouts. With `render`,
 the run is drawn at `RENDER_FPS` and paced to real time.
 """
 function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
@@ -199,7 +201,7 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
     params = env.params
     car = CarParams(params)
     controller = Racer(car, env.sim.agents[1].lidar.scan_angles, env.lidar_dist, nets; schedule=schedule(),
-        tracking, v_max=something(speed, car.speed_cmd_max), racer...)
+        tracking, rng=Xoshiro(seed), v_max=something(speed, car.speed_cmd_max), racer...)
 
     render && add_render_callback!(env, e -> render_callback(e, env, controller))
     obs, _, _, _ = reset!(env, [pose[1] pose[2] pose[3]])

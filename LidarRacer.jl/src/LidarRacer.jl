@@ -263,7 +263,7 @@ end
 # The controller: what runs on the car, from a scan to a command
 
 """
-    Racer(car, beams, lidar_dist, nets; schedule, selector, tracking, stanley, margin, k_σ, latency, v_max)
+    Racer(car, beams, lidar_dist, nets; schedule, selector, tracking, rng, stanley, margin, k_σ, latency, v_max)
 
 The on-board controller of a car `car` (a [`CarParams`](@ref), or anything
 `CarParams` can read) with a LiDAR whose beams point at `beams` [rad],
@@ -272,7 +272,9 @@ the networks `nets` (as from `LidarLaneNets.load_nets`; without `nets.large`,
 the small tier alone). `schedule` (a `LidarLaneNets.CloudSchedule`) decides
 which estimates to ask the cloud's large networks for at each scan, given
 the last lane state; `selector` and `tracking` tune LidarLaneNets.jl's
-selector and Kalman filter; the rest, the [`Planner`](@ref). A scan is
+selector and Kalman filter, and `rng` (an `AbstractRNG`) draws the simulated
+network's dropouts (the default random generator if not given); the rest,
+the [`Planner`](@ref). A scan is
 published `sweep` seconds after its first beam, and its command takes effect
 `latency` after that. `plan` holds the last [`Plan`](@ref).
 
@@ -292,12 +294,14 @@ mutable struct Racer{E}
 end
 
 function Racer(car::CarParams, beams, lidar_dist, nets; schedule=RoundRobin(), selector=SelectorConfig(),
-               tracking=TrackerConfig(),
+               tracking=TrackerConfig(), rng=nothing,
                stanley=default_stanley(car), margin=default_margin(car), k_σ=1.0, latency=default_latency(),
                v_max=car.speed_cmd_max)
     sweep = (beams[end] - beams[1]) / 2π / car.scan_rate
     planner = Planner(car; sweep, latency, stanley, margin, k_σ, v_max)
-    return Racer(TieredEstimator(nets; schedule, cfg=selector), LaneTracker(car.lf + car.lr; cfg=tracking), planner,
+    estimator = rng === nothing ? TieredEstimator(nets; schedule, cfg=selector) :
+                TieredEstimator(nets; schedule, cfg=selector, rng)
+    return Racer(estimator, LaneTracker(car.lf + car.lr; cfg=tracking), planner,
         sweep, latency, 0.0, 0.0, nothing, nothing)
 end
 

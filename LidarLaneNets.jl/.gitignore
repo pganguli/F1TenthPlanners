@@ -1,4 +1,3 @@
 /Manifest*.toml
-train/Manifest*.toml
 train/data/
 train/*.log
