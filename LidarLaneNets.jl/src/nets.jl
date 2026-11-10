@@ -5,8 +5,11 @@
     TIERS
 
 `:small` runs on the car: every 4th beam, three thin convolutions (each
-output sees about 29° of the scan). `:large` runs in the cloud: every beam,
-six wider convolutions (each output sees about 63°) and a wider head.
+output sees about 29° of the scan). `:large` runs in the cloud: the small
+network plus a correction from every beam (six wider convolutions, each
+output seeing about 63°, and a wider head). The correction starts at zero,
+so a large network starts out as its small one and is trained from there:
+it is never less accurate on the validation tracks.
 """
 const TIERS = (:small, :large)
 
@@ -44,26 +47,38 @@ _feature(r::Real) = Float32(0 < r <= RANGE_MAX ? r / RANGE_MAX : 1.0)
 # A convolution that halves the length (odd kernel, "same" padding, stride 2).
 _halve(k, ch, act=relu) = Conv((k,), ch, act; stride=2, pad=(k - 1) ÷ 2)
 
+function _small_model(n_in, n_out)
+    L = cld(cld(cld(n_in, 2), 2), 2)
+    return Chain(_halve(5, 1 => 8), _halve(5, 8 => 16), _halve(5, 16 => 16), FlattenLayer(),
+        Dense(16L => 64, relu), Dense(64 => 2n_out))
+end
+
+# The large network's correction to the small one, from every beam; its last
+# layer starts at zero, so the correction does too.
+function _correction(n_in, n_out)
+    L = n_in
+    for _ in 1:6
+        L = cld(L, 2)
+    end
+    return Chain(_halve(5, 1 => 16), _halve(5, 16 => 32), _halve(5, 32 => 32), _halve(5, 32 => 64),
+        _halve(5, 64 => 64), _halve(5, 64 => 128), FlattenLayer(), Dense(128L => 256, relu),
+        Dense(256 => 128, relu), Dense(128 => 2n_out; init_weight=zeros32, init_bias=zeros32))
+end
+
+_every_4th(x) = x[1:beam_stride(:small):end, :, :]
+
 """
     build_model(tier, n_in, n_out) -> Lux model
 
 The network for one estimate: input `(n_in, 1, batch)`, output
 `(2n_out, batch)`: the normalized mean, then the log standard deviation.
+The large one is the small one (on every 4th of its beams) plus a
+correction: `layer_1.layer_2` of its parameters is a small network's.
 """
 function build_model(tier::Symbol, n_in::Integer, n_out::Integer)
-    if tier === :small
-        L = cld(cld(cld(n_in, 2), 2), 2)
-        return Chain(_halve(5, 1 => 8), _halve(5, 8 => 16), _halve(5, 16 => 16), FlattenLayer(),
-            Dense(16L => 64, relu), Dense(64 => 2n_out))
-    elseif tier === :large
-        L = n_in
-        for _ in 1:6
-            L = cld(L, 2)
-        end
-        return Chain(_halve(5, 1 => 16), _halve(5, 16 => 32), _halve(5, 32 => 32), _halve(5, 32 => 64),
-            _halve(5, 64 => 64), _halve(5, 64 => 128), FlattenLayer(), Dense(128L => 256, relu),
-            Dense(256 => 128, relu), Dense(128 => 2n_out))
-    end
+    tier === :small && return _small_model(n_in, n_out)
+    tier === :large && return Parallel(+, Chain(WrappedFunction(_every_4th), _small_model(cld(n_in, 4), n_out)),
+        _correction(n_in, n_out))
     throw(ArgumentError("unknown tier $tier"))
 end
 
@@ -97,6 +112,20 @@ function EstimatorNet(estimate::Symbol, tier::Symbol, num_beams::Integer; rng::A
     model = build_model(tier, input_size(tier, num_beams), output_size(estimate))
     ps, st = Lux.setup(rng, model)
     return EstimatorNet(estimate, tier, Int(num_beams), model, ps, st, Float32.(y_mean), Float32.(y_std))
+end
+
+"""
+    large_from_small(small::EstimatorNet; rng) -> EstimatorNet
+
+A large network that is exactly `small` (its small part has `small`'s
+parameters and normalization; its correction is zero), to be trained from.
+"""
+function large_from_small(small::EstimatorNet; rng::AbstractRNG=Random.default_rng())
+    small.tier === :small || throw(ArgumentError("need a small network"))
+    net = EstimatorNet(small.estimate, :large, small.num_beams; rng, y_mean=small.y_mean, y_std=small.y_std)
+    ps = merge(net.ps, (; layer_1=merge(net.ps.layer_1, (; layer_2=small.ps))))
+    st = merge(net.st, (; layer_1=merge(net.st.layer_1, (; layer_2=small.st))))
+    return EstimatorNet(net.estimate, :large, net.num_beams, net.model, ps, st, net.y_mean, net.y_std)
 end
 
 """

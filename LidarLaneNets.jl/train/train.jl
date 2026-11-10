@@ -7,7 +7,8 @@
 # each output's squared error over its predicted variance, plus its log
 # standard deviation, weighted by the (non-differentiated) σ^(2β) so that hard
 # samples don't stop the mean from being learned. Targets are normalized per
-# output. Half of each batch is mirrored left to right (the LiDAR is
+# output. A large network starts as its trained small one (see
+# `large_from_small`), so train.jl trains the small ones first. Half of each batch is mirrored left to right (the LiDAR is
 # symmetric: the beams reverse, and so do the signs of e, ψe and κ, the two
 # widths, and the fan of arcs), which doubles the data for free. The epoch
 # kept is the one with the least mean squared error on the validation tracks.
@@ -44,10 +45,11 @@ for pkg in (:LuxCUDA, :AMDGPU, :Metal)
     end
 end
 
-const EPOCHS = (small=parse(Int, get(ENV, "EPOCHS_SMALL", "40")), large=parse(Int, get(ENV, "EPOCHS_LARGE", "30")))
+const EPOCHS = (small=parse(Int, get(ENV, "EPOCHS_SMALL", "40")), large=parse(Int, get(ENV, "EPOCHS_LARGE", "20")))
 const BATCH = 256
-const LR = (small=1e-3, large=1e-3)
-const WEIGHT_DECAY = 1e-4
+# The large networks refine a trained small one: a gentler rate keeps the
+# small part from being knocked off at the start.
+const LR = (small=1e-3, large=3e-4)
 const β = 0.5f0
 
 """
@@ -115,18 +117,27 @@ function evaluate(model, ps, st, F, Yn, dev)
 end
 
 function train_one(est, tier, Ftr, Ytr, Fva, Yva; dev, epochs, rng=Xoshiro(42))
-    both = hcat(Ytr, mirror!(est, copy(Ytr)))   # normalize over the data and its mirror image
-    y_mean = vec(mean(both; dims=2))
-    y_std = max.(vec(std(both; dims=2)), 1f-3)
+    size(Ftr, 1) == input_size(tier, 1081) || error("expected features of 1081 beams")
+    if tier === :small
+        both = hcat(Ytr, mirror!(est, copy(Ytr)))   # normalize over the data and its mirror image
+        y_mean = vec(mean(both; dims=2))
+        y_std = max.(vec(std(both; dims=2)), 1f-3)
+        net = EstimatorNet(est, tier, 1081; rng, y_mean, y_std)
+    else
+        # the trained small network, plus a correction that starts at zero
+        net = large_from_small(load_net(weights_file(WEIGHTS_DIR, est, :small)); rng)
+        y_mean, y_std = net.y_mean, net.y_std
+    end
     norm(Y) = (Y .- y_mean) ./ y_std
     Yn_va = norm(Yva)
     lr = LR[tier]
-    net = EstimatorNet(est, tier, size(Ftr, 1) == input_size(tier, 1081) ? 1081 : error("beams?");
-        rng, y_mean, y_std)
-    # the large networks with weight decay (they can overfit 16 tracks)
-    opt = tier === :large ? AdamW(lr, (0.9, 0.999), WEIGHT_DECAY) : Adam(lr)
-    ts = Training.TrainState(net.model, dev(net.ps), dev(net.st), opt)
-    best, best_ps, best_epoch = Inf, nothing, 0
+    ts = Training.TrainState(net.model, dev(net.ps), dev(net.st), Adam(lr))
+    # epoch 0, the starting point, is a candidate too: a large network is
+    # never kept worse than its small one
+    # (copies: on the CPU, cpu_device returns the training's own arrays, which
+    # the optimizer keeps changing)
+    best, best_ps, best_epoch = evaluate(net.model, ts.parameters, ts.states, Fva, Yn_va, dev), deepcopy(net.ps), 0
+    tier === :large && @printf("  %-6s %-10s epoch  0  (the small network)  val mse %.5f\n", tier, est, best)
     N = size(Ftr, 2)
     steps = epochs * cld(N, BATCH)
     k = 0
@@ -149,16 +160,16 @@ function train_one(est, tier, Ftr, Ytr, Fva, Yva; dev, epochs, rng=Xoshiro(42))
         val = evaluate(net.model, ts.parameters, ts.states, Fva, Yn_va, dev)
         if val < best
             best, best_epoch = val, epoch
-            best_ps = cpu_device()(ts.parameters)
+            best_ps = deepcopy(cpu_device()(ts.parameters))
         end
-        @printf("  %-6s %-10s epoch %2d  train mse %.4f  val mse %.4f  (%.0f s)\n", tier, est, epoch,
+        @printf("  %-6s %-10s epoch %2d  train mse %.5f  val mse %.5f  (%.0f s)\n", tier, est, epoch,
             train_mse / N, val, time() - t0)
         flush(stdout)
     end
     trained = EstimatorNet(est, tier, 1081, net.model, best_ps, cpu_device()(ts.states), y_mean, y_std)
     mkpath(WEIGHTS_DIR)
     save_net(weights_file(WEIGHTS_DIR, est, tier), trained)
-    @printf("  %-6s %-10s kept epoch %d (val mse %.4f)\n", tier, est, best_epoch, best)
+    @printf("  %-6s %-10s kept epoch %d (val mse %.5f)\n", tier, est, best_epoch, best)
     return trained
 end
 

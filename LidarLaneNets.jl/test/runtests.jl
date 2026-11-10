@@ -57,6 +57,15 @@ end
             M, S = predict(net, X)
             @test size(M) == size(S) == (output_size(est), 3)
         end
+        # a large network starts out exactly as its small one
+        small = EstimatorNet(:widths, :small, NB; rng=Xoshiro(7), y_mean=fill(0.5f0, output_size(:widths)),
+            y_std=fill(3.0f0, output_size(:widths)))
+        big = large_from_small(small; rng=Xoshiro(8))
+        x = rand(Xoshiro(9), NB) .* 8
+        @test big.tier === :large && big.y_std == small.y_std
+        @test predict(big, x) == predict(small, x)
+        @test_throws ArgumentError large_from_small(big)
+
         dir = mktempdir()
         for tier in TIERS, est in ESTIMATES
             save_net(weights_file(dir, est, tier), EstimatorNet(est, tier, NB; rng=Xoshiro(5)))
@@ -81,7 +90,7 @@ end
     end
 
     @testset "selector" begin
-        nets = (small=tier_nets(:small), large=tier_nets(:large))
+        nets = (small=tier_nets(:small), large=tier_nets(:large; rng=Xoshiro(2)))
         trusting = (e=Inf, ψe=Inf, κ_profile=Inf, widths=Inf, sight=Inf, clearance=Inf)
         cfg = SelectorConfig(max_σ=trusting, agree=Inf, remote_latency=0.05)
         te = TieredEstimator(nets; schedule=FixedCalls(:κ_profile, :sight), cfg)
