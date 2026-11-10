@@ -184,6 +184,21 @@ end
         @test lb.κ_profile[2:end] ≈ lo.κ_profile[2:end] ≈ fill(0.2, NP - 1)
     end
 
+    @testset "tracker: starts from late measurements alone" begin
+        # e and ψe only ever come one scan late (a car on the cloud alone)
+        tr = LaneTracker(0.257)
+        local lane
+        for k in 0:12
+            t = 0.025k
+            m = k == 0 ? Measurement[] : [meas(:e, t - 0.025, :large, [0.2]), meas(:ψe, t - 0.025, :large, [0.0])]
+            lane = track!(tr, m, 0.0, 0.0, t)
+            k == 0 && @test lane.status === :lost
+            k == 1 && @test lane.status === :predicting   # started, from the scan before
+        end
+        @test lane.status === :predicting
+        @test lane.e ≈ 0.2 atol = 1e-3
+    end
+
     @testset "tracker: lost, and restart after outliers" begin
         tr = LaneTracker(0.257)
         @test track!(tr, Measurement[], 3.0, 0.0, 0.0).status === :lost   # nothing yet

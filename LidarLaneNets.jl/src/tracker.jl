@@ -62,8 +62,9 @@ The tracked lane, at the front axle, now:
 - `sight`, `clearance` (at `CLEARANCE_K`), and their standard deviations.
 - `tiers`: the tier each estimate's latest measurement came from (`:none`
   before the first).
-- `status`: `:ok` (e and ψe measured this scan), `:predicting` (only
-  predicted, for at most `lost_after` scans) or `:lost`.
+- `status`: `:ok` (e and ψe measured for this scan), `:predicting` (the
+  newest scan with them is at most `lost_after` scans old: late cloud
+  results, say) or `:lost`.
 """
 struct LaneState
     e::Float64
@@ -90,10 +91,11 @@ mutable struct _Step
     z::Dict{Symbol,Tuple{Float64,Float64,Symbol}}   # :e, :ψe, :κ => (value, variance, tier)
     profiles::NTuple{3,Vector{Float64}}             # κ_profile, w_left, w_right before this step's measurements
     pz::Dict{Symbol,Tuple{Vector{Float64},Symbol}}  # :κ_profile, :widths => (value, tier)
+    start::Bool               # the filter (re)started from this scan's e and ψe
 end
 
 _Step(t, v, r, odo, x, P, profiles) = _Step(t, v, r, odo, x, P, Dict{Symbol,Tuple{Float64,Float64,Symbol}}(),
-    profiles, Dict{Symbol,Tuple{Vector{Float64},Symbol}}())
+    profiles, Dict{Symbol,Tuple{Vector{Float64},Symbol}}(), false)
 
 # Whether a measurement from `tier` may replace one from `old` for the same scan.
 _replaces(old, tier) = old === nothing || !(old === :large && tier === :small)
@@ -134,18 +136,20 @@ LaneTracker(ref_offset::Real; cfg::TrackerConfig=TrackerConfig()) =
     LaneTracker(cfg, ref_offset, _Step[], zeros(3), zeros(3, 3), false, 0, typemax(Int) ÷ 2,
         fill(NaN, _NP), fill(NaN, _NP), fill(NaN, _NP), nothing, nothing, Dict(est => :none for est in ESTIMATES))
 
-# Restart at the current scan, forgetting the scans before it (a late
-# measurement must not be filtered from a state the restart replaced).
-function _restart_here!(tr::LaneTracker, z)
-    _restart!(tr, z)
-    now = tr.steps[end]
-    now.x, now.P = copy(tr.x), copy(tr.P)
-    empty!(now.z)
-    now.profiles = (copy(tr.κ_profile), copy(tr.w_left), copy(tr.w_right))
-    empty!(now.pz)
-    deleteat!(tr.steps, 1:length(tr.steps)-1)
+# Restart from the measurements of scan k, forgetting the scans before it (a
+# late measurement must not be filtered from a state the restart replaced).
+# The scans after k are then filtered again from it.
+function _restart_at!(tr::LaneTracker, k)
+    step = tr.steps[k]
+    _restart!(tr, step.z)
+    step.x, step.P = copy(tr.x), copy(tr.P)
+    empty!(step.z)
+    step.start = true
+    deleteat!(tr.steps, 1:k-1)
     return tr
 end
+
+_measured(s::_Step) = s.start || (haskey(s.z, :e) && haskey(s.z, :ψe))
 
 _wrap(a) = rem2pi(Float64(a), RoundNearest)
 
@@ -285,11 +289,16 @@ function track!(tr::LaneTracker, meas::AbstractVector{Measurement}, v::Real, yaw
     end
     tr.κ_profile, tr.w_left, tr.w_right = κp, wl, wr
 
-    # filter again from the earliest scan that changed
+    # start from the earliest scan with e and ψe (they may have come late)
     if !tr.ready
-        z = now.z
-        (haskey(z, :e) && haskey(z, :ψe)) && _restart_here!(tr, z)
-    else
+        k = findfirst(s -> haskey(s.z, :e) && haskey(s.z, :ψe), tr.steps)
+        if k !== nothing
+            _restart_at!(tr, k)
+            first_changed = 1
+        end
+    end
+    # filter again from the earliest scan that changed
+    if tr.ready
         x, P = copy(tr.steps[first_changed].x), copy(tr.steps[first_changed].P)
         rejected = 0
         for k in first_changed:length(tr.steps)
@@ -304,12 +313,14 @@ function track!(tr::LaneTracker, meas::AbstractVector{Measurement}, v::Real, yaw
         # outliers in the current scan's e and ψe, scan after scan: the lane changed
         if haskey(now.z, :e) && haskey(now.z, :ψe) && rejected > 0
             tr.outliers += 1
-            tr.outliers >= c.max_outliers && _restart_here!(tr, now.z)
+            tr.outliers >= c.max_outliers && _restart_at!(tr, length(tr.steps))
         else
             tr.outliers = 0
         end
     end
-    tr.unmeasured = haskey(now.z, :e) && haskey(now.z, :ψe) ? 0 : tr.unmeasured + 1
+    # scans since the newest one with e and ψe (late ones count at their scan)
+    k = findlast(_measured, tr.steps)
+    tr.unmeasured = k === nothing ? tr.unmeasured + 1 : length(tr.steps) - k
 
     status = !tr.ready ? :lost : tr.unmeasured == 0 ? :ok : tr.unmeasured <= c.lost_after ? :predicting : :lost
     driven(l) = l === nothing ? 0.0 : now.odo - l.odo
