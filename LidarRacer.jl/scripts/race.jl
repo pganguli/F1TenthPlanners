@@ -167,9 +167,7 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
     agent, hw = env.sim.agents[1], params.width / 2
     sum_off, max_off, sum_e2, sum_ψ2 = 0.0, 0.0, 0.0, 0.0
     hint = 0
-    last_scan, steer, v_cmd = -Inf, 0.0, 0.0
-    # commands on their way, oldest first: (time it takes effect, steer, speed)
-    pending = Tuple{Float64,Float64,Float64}[]
+    clock, commands = ScanClock(params.scan_rate), CommandQueue()
     next_frame = 1 / RENDER_FPS   # sim time of the next frame drawn
     start = time()
     # The env reports `done` after 2 laps (as in Python), so stop on our own
@@ -188,11 +186,10 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
         # ends, and holds it in between. As on the real car, the controller
         # runs once per new scan; its command takes effect `latency` after the
         # scan's publication and is held until the next.
-        if obs.scan_times[1] != last_scan
-            scan_dt = isfinite(last_scan) ? obs.scan_times[1] - last_scan : 1 / params.scan_rate
-            last_scan = obs.scan_times[1]
+        scan_dt = new_scan!(clock, obs.scan_times[1])
+        if scan_dt !== nothing
             new_steer, new_speed, lane = control!(controller, obs.scans[1], v, r, scan_dt)
-            push!(pending, (last_scan + controller.sweep + controller.latency, new_steer, new_speed))
+            queue!(commands, clock.last + controller.sweep + controller.latency, new_steer, new_speed)
             scans += 1
             lane.status === :ok || (not_ok += 1)
             # time to collision if the car held the arc it is driving
@@ -219,9 +216,7 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
                 sum_ψ2 += wrap_angle(lane.ψe - fa.ψe)^2
             end
         end
-        while !isempty(pending) && env.current_time >= pending[1][1] - 1e-9
-            _, steer, v_cmd = popfirst!(pending)
-        end
+        steer, v_cmd = command_at!(commands, env.current_time)
         obs, step_time, _, _ = step!(env, [steer v_cmd])
         # draw at the display's rate, not the simulator's (400 steps a
         # second), each frame waiting for the wall clock to catch up

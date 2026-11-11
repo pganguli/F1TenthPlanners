@@ -136,32 +136,37 @@ Crashes in 40 runs:
 | Estimates from | Cloud calls per scan | 25 ms cloud latency | 50 ms | 100 ms |
 |---|---|---|---|---|
 | the car's networks only | 0 | 8 | 8 | 8 |
-| the cloud's only | 6 | **0** | **0** | 2 |
+| the cloud's only | 6 | **0** | **0** | 5 |
 | the car's, and the cloud's for every estimate | 6 | **0** | **0** | 8 |
-| the car's, and the cloud's in turn (round robin) | 1 | 4 | 7 | 8 |
-| the car's, and the cloud's far ahead (κ_profile, widths, sight) | 3 | **0** | **0** | 7 |
+| the car's, and the cloud's in turn (round robin) | 1 | 4 | 8 | 8 |
+| the car's, and the cloud's far ahead (κ_profile, widths, sight) | 3 | **0** | **0** | 8 |
 
 How close the car came to the walls, at 50 ms (a public cloud over 5G):
 
 | Estimates from | Closest to a wall, worst run | Closest to a wall, mean | Time within 0.2 m of a wall | Scans with time to collision under 0.5 s | Heading error (RMS) |
 |---|---|---|---|---|---|
-| the car's networks only | 0.07 m | 0.27 m | 0.22% | 0.94% | 1.92° |
-| the cloud's only | 0.10 m | 0.33 m | 0.18% | 0.15% | 1.96° |
-| the car's, and the cloud's for every estimate | **0.19 m** | 0.36 m | **0%** | **0%** | **1.25°** |
-| the car's, and the cloud's far ahead | **0.19 m** | 0.37 m | **0%** | **0%** | **1.26°** |
+| the car's networks only | 0.07 m | 0.27 m | 0.24% | 0.95% | 1.98° |
+| the cloud's only | 0.10 m | 0.32 m | 0.16% | 0.14% | 1.96° |
+| the car's, and the cloud's for every estimate | **0.21 m** | 0.36 m | **0%** | **0.01%** | **1.26°** |
+| the car's, and the cloud's far ahead | **0.16 m** | 0.36 m | **0.01%** | **0.02%** | **1.26°** |
 
 - **Combining is safer than either tier alone at 25 and 50 ms.** With the
-  cloud far ahead or for every estimate, no run crashed, came within 0.2 m
-  of a wall, or got under 0.5 s from a collision. The worst run's closest
-  approach is about twice the cloud alone's (0.19 m against 0.10 m at
-  50 ms; 0.29–0.35 m against 0.10 m at 25 ms). The heading is tracked about
-  a third more accurately than by either tier alone.
+  cloud far ahead or for every estimate, no run crashed, and the car was
+  within 0.2 m of a wall, or under 0.5 s from a collision, at most 0.02% of
+  the time (the car alone: 0.24% and 0.95%). The worst run's closest
+  approach is 1.6–2 times the cloud alone's (0.16–0.21 m against 0.10 m at
+  25 and 50 ms). The heading is tracked about a third more accurately than
+  by either tier alone.
 - **Far ahead does it with half the cloud calls**, and it plans on too much
-  free distance less often than the car alone (4.8% of scans against 5.9%
-  at 50 ms), as the cloud alone does (5.2%).
+  free distance less often than the car alone (4.9% of scans against 6.0%
+  at 50 ms), as the cloud alone does (5.3%).
 - **It gets worse as the cloud's latency grows.** At 100 ms every
   combination crashes on YasMarina like the car alone, and the cloud alone
-  crashes twice on Monza.
+  crashes on Monza: 5 of 8 runs here, but between 2 and 6 in reruns that
+  differ only in the last bits of floating point (with 4 scans of delay,
+  Monza at 100 ms is on the edge, and the tiny differences grow over a
+  lap). The other crash counts moved by at most one run between such
+  reruns.
 - **Every crash of a combination is on YasMarina.** In its hairpin the
   car's heading network is off by about 0.3 rad, far beyond its usual bias.
   The cloud's results correct it, but only if they come often enough and
@@ -171,7 +176,7 @@ How close the car came to the walls, at 50 ms (a public cloud over 5G):
 
 The combinations that call the cloud's clearance (for every estimate, and
 round robin) plan on too much free distance in more scans than the car
-alone: 6.4–7.9% against 5.9%.
+alone: 6.4–8.1% against 6.0%.
 
 Lap times differ little (75–80 s on average over the laps finished; the
 true estimates give 74.0 s). The configurations finish different sets of

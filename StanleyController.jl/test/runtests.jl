@@ -94,4 +94,15 @@ using Test
         q = Path(R .* cos.(-φ), R .* sin.(-φ); closed=true)
         @test all(isapprox.(q.curvature, -1 / R; rtol=1e-3))
     end
+
+    @testset "points along a path, curvature of three points" begin
+        sq = Path([0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 1.0, 1.0]; closed=true)   # unit square, 4 m around
+        @test point_at(sq, 0.5) == (0.5, 0.0) && point_at(sq, 3.5) == (0.0, 0.5)
+        @test all(point_at(sq, 4.25) .≈ (0.25, 0.0)) && all(point_at(sq, -0.25) .≈ (0.0, 0.25))
+        line = Path([0.0, 1.0], [0.0, 0.0])
+        @test point_at(line, 2.0) == (2.0, 0.0) && point_at(line, -1.0) == (-1.0, 0.0)   # extended
+        @test menger_curvature((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)) ≈ 1.0      # unit circle, left
+        @test menger_curvature((-1.0, 0.0), (0.0, 1.0), (1.0, 0.0)) ≈ -1.0     # right
+        @test menger_curvature((0.0, 0.0), (1.0, 0.0), (2.0, 0.0)) == 0.0
+    end
 end

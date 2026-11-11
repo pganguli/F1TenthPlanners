@@ -403,10 +403,10 @@ $$
 Process noise:
 
 $$
-Q = \operatorname{diag}\!\Big( (q_e\,\Delta t)^2,\ (q_\psi\,\Delta t)^2,\ (q_\kappa\,|v|\,\Delta t)^2,\ \sigma_{b,e}^2(1-a_e^2),\ \sigma_{b,\psi}^2(1-a_\psi^2),\ \sigma_{b,\kappa}^2(1-a_\kappa^2) \Big)
+Q = \operatorname{diag}\!\Big( q_e^2\,\Delta t,\ q_\psi^2\,\Delta t,\ (q_\kappa\,|v|\,\Delta t)^2,\ \sigma_{b,e}^2(1-a_e^2),\ \sigma_{b,\psi}^2(1-a_\psi^2),\ \sigma_{b,\kappa}^2(1-a_\kappa^2) \Big)
 $$
 
-with $q_e = 0.5$ m/s, $q_\psi = 0.85$ rad/s and $q_\kappa = 0.8\ \text{m}^{-2}$.
+with $q_e = 0.079\ \text{m}/\sqrt{\text{s}}$, $q_\psi = 0.134\ \text{rad}/\sqrt{\text{s}}$ and $q_\kappa = 0.8\ \text{m}^{-2}$. For $e$ and $\psi_e$ these are random walks: the variance grows in proportion to the time. The values give the same noise as the original tuning at 40 Hz. For $\kappa$, the standard deviation of each step's change is proportional to the distance driven in the step, as originally tuned at 40 Hz. A random walk in distance (variance $\propto |v|\,\Delta t$) would change the noise at speeds other than the one it is matched at: matched at 5.5 m/s, it halved the noise at 10 m/s, and the car on the cloud alone at 100 ms crashed 6 times on Monza instead of 2. It would need tuning again.
 
 The prediction uses the unscented transform with $\alpha = 1$, $\beta = 2$, $\kappa_{\text{UT}} = 0$. Thus $\lambda = 0$, and there are $2n + 1 = 13$ sigma points:
 
@@ -587,33 +587,34 @@ This example shows why the latency and the call rate are important. At 100 ms, t
 | Configuration | 25 ms | 50 ms | 100 ms |
 |---|---|---|---|
 | Car only | 8 | 8 | 8 |
-| Cloud only | 0 | 0 | 2 |
+| Cloud only | 0 | 0 | 5 |
 | Combo, all | **0** | **0** | 8 |
-| Combo, far ahead | **0** | **0** | 7 |
-| Combo, round robin | 4 | 7 | 8 |
+| Combo, far ahead | **0** | **0** | 8 |
+| Combo, round robin | 4 | 8 | 8 |
 
 The car-only row does not use the cloud. Thus it is the same at each latency.
+
+Some runs are on the edge. Reruns of code that differs only in the last bits of floating point moved most crash counts by at most one run. The cloud alone at 100 ms on Monza moved from 2 to 6 crashes: with results 4 scans late, the tiny differences grow over a lap.
 
 ### 8.3 Distance to the walls at 50 ms
 
 | Configuration | Closest to a wall, worst run | Closest to a wall, mean | Time within 0.2 m of a wall | Scans with time to collision under 0.5 s | Heading error (RMS) |
 |---|---|---|---|---|---|
-| Car only | 0.07 m | 0.27 m | 0.22% | 0.94% | 1.92° |
-| Cloud only | 0.10 m | 0.33 m | 0.18% | 0.15% | 1.96° |
-| Combo, all | **0.19 m** | 0.36 m | **0%** | **0%** | **1.25°** |
-| Combo, far ahead | **0.19 m** | 0.37 m | **0%** | **0%** | **1.26°** |
+| Car only | 0.07 m | 0.27 m | 0.24% | 0.95% | 1.98° |
+| Cloud only | 0.10 m | 0.32 m | 0.16% | 0.14% | 1.96° |
+| Combo, all | **0.21 m** | 0.36 m | **0%** | **0.01%** | **1.26°** |
+| Combo, far ahead | **0.16 m** | 0.36 m | **0.01%** | **0.02%** | **1.26°** |
 
-At 25 ms, the worst run of the combination came no closer than 0.29 m (all) and 0.35 m (far ahead) to a wall. The cloud alone came to 0.10 m.
+At 25 ms, the worst run of the combination came no closer than 0.21 m (all and far ahead) to a wall. The cloud alone came to 0.10 m.
 
 ### 8.4 What the race results show
 
 1. **At 25 ms and 50 ms, the combination is safer than the car alone and the cloud alone.**
    - No run crashed.
-   - No run came within 0.2 m of a wall.
-   - No run came under 0.5 s from a collision.
-   - The closest distance to a wall in the worst run is approximately two times that of the cloud alone.
-2. **"Far ahead" gives the same safety with half the cloud calls.** It also sets the speed for too much free distance less frequently than the car alone (4.8% of scans, against 5.9%), as the cloud alone does (5.2%).
-3. **Safety decreases when the latency increases.** At 100 ms, all combinations crash on YasMarina, as the car alone does. The cloud alone crashes 2 times on Monza.
+   - The car was within 0.2 m of a wall, or under 0.5 s from a collision, for at most 0.02% of the time. The car alone: 0.24% and 0.95%.
+   - The closest distance to a wall in the worst run is 1.6 to 2 times that of the cloud alone.
+2. **"Far ahead" gives the same safety with half the cloud calls.** It also sets the speed for too much free distance less frequently than the car alone (4.9% of scans, against 6.0%), as the cloud alone does (5.3%).
+3. **Safety decreases when the latency increases.** At 100 ms, all combinations crash on YasMarina, as the car alone does. The cloud alone crashes on Monza (5 of 8 runs; 2 to 6 in reruns, see 8.2).
 4. **All crashes of a combination are on YasMarina.** In one hairpin, the car's `ψe` network has a bias of approximately 0.3 rad. Its usual bias is 0.02 rad. The cloud corrects this bias only when its results arrive frequently and quickly:
    - Round robin calls `ψe` only on each 6th scan.
    - At 100 ms, each cloud result is 4 scans old.
@@ -622,7 +623,7 @@ At 25 ms, the worst run of the combination came no closer than 0.29 m (all) and 
 ### 8.5 Problems that stay open
 
 - **YasMarina at 100 ms and with round robin.** A schedule that adapts can call the cloud for `ψe` when the car goes into a tight corner. This is the first case for the sensitivity-informed schedule.
-- **Too much free distance.** The configurations that use the cloud's `clearance` (combo all, round robin) set the speed for too much free distance in more scans than the car alone (6.4% to 7.9%, against 5.9%). The filter possibly trusts the cloud's `clearance` too much.
+- **Too much free distance.** The configurations that use the cloud's `clearance` (combo all, round robin) set the speed for too much free distance in more scans than the car alone (6.4% to 8.1%, against 6.0%). The filter possibly trusts the cloud's `clearance` too much.
 
 ## 9. Reproducibility
 

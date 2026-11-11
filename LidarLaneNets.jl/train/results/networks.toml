@@ -1,0 +1,126 @@
+
+[clearance.large]
+macs = 4244432
+parameters = 711908
+test_rmse = 0.21786142307576825
+validation_r2 = 0.8996697083510758
+within_1sigma = 0.5952147435897436
+
+[clearance.small_strong]
+macs = 128960
+parameters = 38570
+test_rmse = 0.28153323355255233
+validation_r2 = 0.8434761790534402
+within_1sigma = 0.6527564102564103
+
+[clearance.small_weak]
+macs = 17424
+parameters = 5762
+test_rmse = 0.3714626402013069
+validation_r2 = 0.7182197557437242
+within_1sigma = 0.6487179487179487
+
+[e.large]
+macs = 4239824
+parameters = 707252
+test_rmse = 0.007891895552671759
+validation_r2 = 0.9986483901175927
+within_1sigma = 0.6495416666666667
+
+[e.small_strong]
+macs = 127424
+parameters = 37010
+test_rmse = 0.008060165094402506
+validation_r2 = 0.9985855200884733
+within_1sigma = 0.6792916666666666
+
+[e.small_weak]
+macs = 16656
+parameters = 4970
+test_rmse = 0.009667053583545538
+validation_r2 = 0.9981768237588393
+within_1sigma = 0.659125
+
+[kappa_profile.large]
+macs = 4252112
+parameters = 719668
+test_rmse = 0.0714427876854999
+validation_r2 = 0.8116652648650946
+within_1sigma = 0.7853830385673335
+
+[kappa_profile.small_strong]
+macs = 131520
+parameters = 41170
+test_rmse = 0.07986078707104662
+validation_r2 = 0.7848288714390447
+within_1sigma = 0.8293937609248505
+
+[kappa_profile.small_weak]
+macs = 18704
+parameters = 7082
+test_rmse = 0.09164281456302026
+validation_r2 = 0.6906854526880755
+within_1sigma = 0.806560907599855
+
+[psi_e.large]
+macs = 4239824
+parameters = 707252
+test_rmse = 0.024955888367056086
+validation_r2 = 0.9329642061225969
+within_1sigma = 0.6925833333333333
+
+[psi_e.small_strong]
+macs = 127424
+parameters = 37010
+test_rmse = 0.025280225680415488
+validation_r2 = 0.932256298578781
+within_1sigma = 0.6764166666666667
+
+[psi_e.small_weak]
+macs = 16656
+parameters = 4970
+test_rmse = 0.031213416870512815
+validation_r2 = 0.9267437220705067
+within_1sigma = 0.67325
+
+[sight.large]
+macs = 4239824
+parameters = 707252
+test_rmse = 0.16846545594955392
+validation_r2 = 0.9920105383491687
+within_1sigma = 0.63875
+
+[sight.small_strong]
+macs = 127424
+parameters = 37010
+test_rmse = 0.18568576021837233
+validation_r2 = 0.9904768254501576
+within_1sigma = 0.732125
+
+[sight.small_weak]
+macs = 16656
+parameters = 4970
+test_rmse = 0.22196439642306337
+validation_r2 = 0.9858188220372665
+within_1sigma = 0.8205
+
+[widths.large]
+macs = 4264784
+parameters = 732472
+test_rmse = 0.09850289707818712
+validation_r2 = 0.7111958250087222
+within_1sigma = 0.6451258151943191
+
+[widths.small_strong]
+macs = 135744
+parameters = 45460
+test_rmse = 0.09843574039319403
+validation_r2 = 0.7107726356935042
+within_1sigma = 0.6390065512041089
+
+[widths.small_weak]
+macs = 20816
+parameters = 9260
+test_rmse = 0.099490458406106
+validation_r2 = 0.7020024988254574
+within_1sigma = 0.632629201308354

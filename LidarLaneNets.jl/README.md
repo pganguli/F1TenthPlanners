@@ -229,12 +229,16 @@ cd train
 julia --project=. -e 'import Pkg; Pkg.instantiate()'
 julia -t auto --project=. collect.jl      # data/: labeled scans from every racetrack (~15 s)
 julia -t auto --project=. train.jl        # weights/: all 18 networks (small_weak, small_strong, large)
-julia -t auto --project=. evaluate.jl     # results/networks.md: cost and accuracy, on the held-out tracks
-julia -t auto --project=. errors.jl       # results/errors.md: the error distributions
+julia -t auto --project=. evaluate.jl     # results/networks.md (and .toml): cost and accuracy, on the held-out tracks
+julia -t auto --project=. errors.jl       # results/errors.md (and .toml): the error distributions
 julia -t auto --project=. fusion.jl       # weights/fusion.toml: the noise the tracker combines the tiers with
-julia --project=. plots.jl                # results/*.pdf: accuracy against MACs, the error distributions
+julia --project=. plots.jl                # results/*.pdf: accuracy against MACs, the error distributions (from the .toml)
 ```
 
+- **Shared**: [`tracks.jl`](train/tracks.jl) (the track split, centerlines,
+  distances to the walls; LidarRacer.jl's race scripts use it too),
+  [`common.jl`](train/common.jl) (paths, loading the data, running a network
+  over it) and [`tdist.jl`](train/tdist.jl) (fitting a Student t).
 - **Labels** ([`truth.jl`](train/truth.jl)): the true value of every
   estimate, from the map and the track's centerline, at the LiDAR's pose at
   the middle of its sweep.

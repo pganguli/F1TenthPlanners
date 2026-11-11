@@ -20,7 +20,7 @@ estimate them some other way (for example from a sensor) and pass them to
 """
 module StanleyController
 
-export Stanley, steering_angle, TrackingError, Path, tracking_error, front_axle, wrap_angle
+export Stanley, steering_angle, TrackingError, Path, tracking_error, front_axle, wrap_angle, point_at, menger_curvature
 
 """
     wrap_angle(a) -> Float64
@@ -166,6 +166,38 @@ function Path(x::AbstractVector{<:Real}, y::AbstractVector{<:Real}; closed::Bool
 end
 
 Base.length(p::Path) = length(p.x)
+
+"""
+    point_at(path, s) -> (x, y)
+
+The point of `path` at arc length `s`, on the straight segments between its
+points. A closed path wraps around; an open one extends its end segments.
+"""
+function point_at(p::Path, s::Real)
+    n = length(p.x)
+    if p.closed
+        s = mod(s, p.s[end] + p.seg_length[end])
+        i = searchsortedlast(p.s, s)
+        j = mod1(i + 1, n)
+    else
+        i = clamp(searchsortedlast(p.s, s), 1, n - 1)
+        j = i + 1
+    end
+    t = (s - p.s[i]) / p.seg_length[i]
+    return (p.x[i] + t * (p.x[j] - p.x[i]), p.y[i] + t * (p.y[j] - p.y[i]))
+end
+
+"""
+    menger_curvature(a, b, c) -> κ
+
+The signed curvature of the circle through the points `a`, `b` and `c`
+(`> 0` when they turn left), from Menger's formula: 4 × the triangle's area
+over the product of its sides.
+"""
+function menger_curvature(a, b, c)
+    cross = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1])
+    return 2cross / (hypot(b[1] - a[1], b[2] - a[2]) * hypot(c[1] - b[1], c[2] - b[2]) * hypot(c[1] - a[1], c[2] - a[2]))
+end
 
 """
     nsegments(p::Path) -> Int

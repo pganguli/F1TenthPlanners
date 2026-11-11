@@ -32,7 +32,8 @@ wander!(w::Wander, dt, rng) = (w.x += -w.x * dt / w.τ + w.σ * sqrt(2dt / w.τ)
 function sensor!(scan, noise_sd, far, rng)
     for i in eachindex(scan)
         d = scan[i]
-        scan[i] = d >= far ? 65.533 : d < 0.021 ? 0.004 : d + noise_sd * randn(rng)
+        scan[i] = d >= far ? F1Tenth.LIDAR_NO_ECHO : d < F1Tenth.LIDAR_MIN_RANGE ? F1Tenth.LIDAR_TOO_CLOSE :
+                  d + noise_sd * randn(rng)
     end
     return scan
 end
@@ -75,28 +76,26 @@ function drive_truth(name; seconds=60.0, seed=1, v_max=nothing, a_lat=5.0, wande
     track = Track(name)
     env = F110Env(; map=name, num_agents=1, timestep=0.0025, integrator=Integrator.RK4, seed)
     car, agent, p = CarParams(env.params), env.sim.agents[1], env.params
-    beams = agent.lidar.scan_angles
-    sweep = (beams[end] - beams[1]) / 2π / car.scan_rate
+    sweep = scan_sweep(car, agent.lidar.scan_angles)
     planner = Planner(car; sweep, v_max=something(v_max, car.speed_cmd_max), a_lat)
     x_ref, hw = car.lf - env.lidar_dist, car.width / 2
     e_err, ψ_err = Wander(0.0, 0.15, 1.5), Wander(0.0, 0.06, 1.0)
 
     pose = something(start, (center_point(track, 0.0)..., center_heading(track, 0.0)))
     obs, _, _, _ = reset!(env, [pose[1] pose[2] pose[3]])
-    t, crashes, hint, last_scan = 0.0, 0, 0, -Inf
-    steer, v_cmd, pending = 0.0, 0.0, Tuple{Float64,Float64,Float64}[]
+    t, crashes, hint = 0.0, 0, 0
+    clock, commands = ScanClock(car.scan_rate), CommandQueue()
     restart() = begin
         crashes += 1
         x, y, θ = random_start(track, rng)
         obs, _, _, _ = reset!(env, [x y θ])
-        hint, last_scan, steer, v_cmd = 0, -Inf, 0.0, 0.0
-        empty!(pending)
+        hint, clock.last = 0, -Inf
+        clear!(commands)
     end
     while t < seconds && obs.lap_counts[1] < laps
         v, r = obs.linear_vels_x[1], obs.ang_vels_z[1]
-        if obs.scan_times[1] != last_scan
-            dt = isfinite(last_scan) ? obs.scan_times[1] - last_scan : 1 / car.scan_rate
-            last_scan = obs.scan_times[1]
+        dt = new_scan!(clock, obs.scan_times[1])
+        if dt !== nothing
             res = truth(track, agent.scan_origin, x_ref; hw, scan_range=car.scan_range, hint)
             if res === nothing
                 restart()
@@ -108,11 +107,9 @@ function drive_truth(name; seconds=60.0, seed=1, v_max=nothing, a_lat=5.0, wande
                 labels = merge(labels, (e=labels.e .+ wander!(e_err, dt, rng), ψe=labels.ψe .+ wander!(ψ_err, dt, rng)))
             end
             new_steer, new_speed, _ = drive(planner, LaneState(labels), v, r)
-            push!(pending, (last_scan + sweep + LidarRacer.default_latency(), new_steer, new_speed))
+            queue!(commands, clock.last + sweep + LidarRacer.default_latency(), new_steer, new_speed)
         end
-        while !isempty(pending) && env.current_time >= pending[1][1] - 1e-9
-            _, steer, v_cmd = popfirst!(pending)
-        end
+        steer, v_cmd = command_at!(commands, env.current_time)
         obs, dt_step, _, _ = step!(env, [steer v_cmd])
         t += dt_step
         if obs.collisions[1] > 0

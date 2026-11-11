@@ -3,7 +3,7 @@
 # driver steers by.
 
 include("common.jl")   # the tracks, their walls, the data
-using StanleyController: Path, tracking_error
+using StanleyController: Path, tracking_error, front_axle, point_at, menger_curvature
 
 # Curvature of the true center line: the circle through points this far apart [m].
 const CURVE_BASE = 1.0
@@ -26,25 +26,15 @@ function Track(name::AbstractString)
 end
 
 # Point of the closed centerline at arc length s.
-function center_point(tr::Track, s)
-    c = tr.center
-    s = mod(s, tr.length)
-    i = searchsortedlast(c.s, s)
-    j = mod1(i + 1, length(c.x))
-    t = (s - c.s[i]) / c.seg_length[i]
-    return (c.x[i] + t * (c.x[j] - c.x[i]), c.y[i] + t * (c.y[j] - c.y[i]))
-end
+center_point(tr::Track, s) = point_at(tr.center, s)
 
 function center_heading(tr::Track, s)
     a, b = center_point(tr, s - 0.25), center_point(tr, s + 0.25)
     return atan(b[2] - a[2], b[1] - a[1])
 end
 
-function center_curvature(tr::Track, s)
-    a, b, c = center_point(tr, s - CURVE_BASE / 2), center_point(tr, s), center_point(tr, s + CURVE_BASE / 2)
-    cross = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1])
-    return 2cross / (hypot(b[1] - a[1], b[2] - a[2]) * hypot(c[1] - b[1], c[2] - b[2]) * hypot(c[1] - a[1], c[2] - a[2]))
-end
+center_curvature(tr::Track, s) =
+    menger_curvature(center_point(tr, s - CURVE_BASE / 2), center_point(tr, s), center_point(tr, s + CURVE_BASE / 2))
 
 # Whether the straight line from a to b crosses no wall.
 function visible(m::F1Tenth.MapData, a, b)
@@ -63,7 +53,7 @@ segment beside the car) speeds up the next call when passed as `hint`.
 """
 function truth(tr::Track, (lx, ly, θ), x_ref; hw, scan_range, hint=0)
     m = tr.map
-    fx, fy = lx + x_ref * cos(θ), ly + x_ref * sin(θ)
+    fx, fy = front_axle(lx, ly, θ, x_ref)
     wall_distance(m, fx, fy) < m.resolution && return nothing
     err = tracking_error(tr.center, fx, fy, θ; hint, window=hint == 0 ? 0 : 40)
     s0 = err.s

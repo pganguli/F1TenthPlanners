@@ -1,6 +1,6 @@
 # How the networks' errors are distributed: a Student t, fitted to each.
 #
-#     julia -t auto --project=. errors.jl      # prints, and writes results/errors.md
+#     julia -t auto --project=. errors.jl      # prints, and writes results/errors.md (and .toml)
 #
 # For every network (estimate × network set, see LidarLaneNets.NETWORKS): its
 # errors (estimate − truth) on the held-out tracks' scans while driving, over
@@ -14,6 +14,7 @@
 
 using Printf
 using Random
+using TOML
 
 include("common.jl")
 include("tdist.jl")   # fit_t
@@ -53,6 +54,7 @@ function main()
     rows = ["| Estimate | Network | μ | s | ν | Unit | μ / σ | s / σ | ν / σ |", "|---|---|---|---|---|---|---|---|---|"]
     wins = Dict(:raw => Dict(n => 0 for (n, _, _) in MODELS), :std => Dict(n => 0 for (n, _, _) in MODELS))
     exceptions = String[]
+    data = Dict{String,Any}()   # the fits, for plots.jl: estimate => network set => …
     for est in ESTIMATES, name in NETWORKS
         net = load_net(weights_file(WEIGHTS_DIR, est, name))
         μ, σ = means_sigmas(net, Xte)
@@ -70,6 +72,10 @@ function main()
         best_e === :t || push!(exceptions, "`$est`, $name (errors): $(NAMES[best_e])")
         best_z === :t || push!(exceptions, "`$est`, $name (errors over σ): $(NAMES[best_z])")
         push!(rows, "| `$est` | $name | $(t_text(fits_e[:t][1])) | $(UNITS[est]) | $(t_text(fits_z[:t][1])) |")
+        pe, pz = fits_e[:t][1], fits_z[:t][1]
+        get!(data, file_name(est), Dict{String,Any}())[String(name)] =
+            Dict("mu" => pe.μ, "s" => pe.s, "nu" => pe.ν, "mu_over_sigma" => pz.μ, "s_over_sigma" => pz.s,
+                "nu_over_sigma" => pz.ν)
         println(rows[end]); flush(stdout)
     end
     n = length(ESTIMATES) * length(NETWORKS)
@@ -77,6 +83,7 @@ function main()
           "$(wins[:std][:t]) of $n of the errors over σ" *
           (isempty(exceptions) ? "." : " (otherwise: " * join(exceptions, "; ") * ").")
     mkpath(RESULTS_DIR)
+    open(io -> TOML.print(io, data; sorted=true), joinpath(RESULTS_DIR, "errors.toml"), "w")
     write(joinpath(RESULTS_DIR, "errors.md"), """
         # How the networks' errors are distributed
 

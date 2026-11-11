@@ -31,6 +31,7 @@ using StanleyController
 using VelocityProfilePlanner
 
 export CarParams, SpeedConfig, speed_command, Planner, Plan, drive, lane_center, Racer, control!
+export scan_sweep, ScanClock, new_scan!, CommandQueue, queue!, command_at!, clear!
 
 # ---------------------------------------------------------------------------
 # The car
@@ -210,15 +211,7 @@ end
 function _curvature_at(p::Path, s, base)
     lo, hi = max(s - base / 2, 0.0), min(s + base / 2, p.s[end])
     hi - lo < base / 2 && return NaN
-    a, b, c = _point_at(p, lo), _point_at(p, (lo + hi) / 2), _point_at(p, hi)
-    cross = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1])
-    return 2cross / (hypot(b[1] - a[1], b[2] - a[2]) * hypot(c[1] - b[1], c[2] - b[2]) * hypot(c[1] - a[1], c[2] - a[2]))
-end
-
-function _point_at(p::Path, s)
-    i = clamp(searchsortedlast(p.s, s), 1, length(p.s) - 1)
-    t = (s - p.s[i]) / p.seg_length[i]
-    return (p.x[i] + t * (p.x[i+1] - p.x[i]), p.y[i] + t * (p.y[i+1] - p.y[i]))
+    return menger_curvature(point_at(p, lo), point_at(p, (lo + hi) / 2), point_at(p, hi))
 end
 
 # The free distance along the arc of curvature κ, from the fan of arcs
@@ -297,7 +290,7 @@ function Racer(car::CarParams, beams, nets; schedule=RoundRobin(), selector=Sele
                tracking=TrackerConfig(), rng=nothing,
                stanley=default_stanley(car), margin=default_margin(car), k_σ=1.0, latency=default_latency(),
                v_max=car.speed_cmd_max)
-    sweep = (beams[end] - beams[1]) / 2π / car.scan_rate
+    sweep = scan_sweep(car, beams)
     planner = Planner(car; sweep, latency, stanley, margin, k_σ, v_max)
     return Racer(TieredEstimator(nets; schedule, cfg=selector, rng), LaneTracker(car.lf + car.lr; cfg=tracking), planner,
         sweep, latency, 0.0, 0.0, nothing, nothing)
@@ -320,6 +313,81 @@ default_stanley(car) = Stanley(k=3.0, k_soft=1.0, k_yaw=0.1, max_steer=car.s_max
 
 # The path keeps half the car's width plus 0.15 m from the walls.
 default_margin(car) = car.width / 2 + 0.15
+
+# ---------------------------------------------------------------------------
+# Timing: when scans come, and when commands take effect
+
+"""
+    scan_sweep(car, beams) -> seconds
+
+How long the LiDAR takes to sweep its beams `beams` [rad]: a scan is
+published that long after its first beam.
+"""
+scan_sweep(car::CarParams, beams) = (beams[end] - beams[1]) / 2π / car.scan_rate
+
+"""
+    ScanClock(scan_rate)
+
+Tells new scans from the one held since the last: [`new_scan!`](@ref).
+"""
+mutable struct ScanClock
+    last::Float64
+    rate::Float64
+end
+ScanClock(rate::Real) = ScanClock(-Inf, Float64(rate))
+
+"""
+    new_scan!(clock, scan_time) -> dt or nothing
+
+For the time stamp of the scan the LiDAR holds now: the time since the last
+scan if it is new (one scan period for the first), else `nothing`.
+"""
+function new_scan!(c::ScanClock, scan_time::Real)
+    scan_time == c.last && return nothing
+    dt = isfinite(c.last) ? scan_time - c.last : 1 / c.rate
+    c.last = scan_time
+    return dt
+end
+
+"""
+    CommandQueue()
+
+Commands on their way to the car, oldest first: each takes effect at its
+time ([`queue!`](@ref)) and holds until the next ([`command_at!`](@ref)).
+Before the first, the car is commanded to stand still, wheels straight.
+"""
+mutable struct CommandQueue
+    pending::Vector{NTuple{3,Float64}}   # (time it takes effect, steer, speed)
+    steer::Float64
+    speed::Float64
+end
+CommandQueue() = CommandQueue(NTuple{3,Float64}[], 0.0, 0.0)
+
+"""
+    queue!(q, t, steer, speed) -> q
+
+A command that takes effect at time `t`.
+"""
+queue!(q::CommandQueue, t, steer, speed) = (push!(q.pending, (Float64(t), Float64(steer), Float64(speed))); q)
+
+"""
+    command_at!(q, now) -> (steer, speed)
+
+The command in effect at time `now` (dropping those it replaces).
+"""
+function command_at!(q::CommandQueue, now)
+    while !isempty(q.pending) && now >= q.pending[1][1] - 1e-9
+        _, q.steer, q.speed = popfirst!(q.pending)
+    end
+    return q.steer, q.speed
+end
+
+"""
+    clear!(q) -> q
+
+Drop every command on its way and command standing still.
+"""
+clear!(q::CommandQueue) = (empty!(q.pending); q.steer = q.speed = 0.0; q)
 
 """
     control!(r::Racer, ranges, v, yaw_rate, dt) -> (steer, speed, lane)

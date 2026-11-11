@@ -91,10 +91,12 @@ end
 Tuning of the [`LaneTracker`](@ref).
 """
 Base.@kwdef struct TrackerConfig
-    # What the motion model can't explain, as rates: sideways speed [m/s],
-    # heading rate [rad/s], change of curvature per meter driven [1/m²].
-    q_e::Float64 = 0.5
-    q_ψ::Float64 = 0.85
+    # What the motion model can't explain: e and ψe as random walks, their
+    # variance growing by q_e² [m²/s] and q_ψ² [rad²/s] per second (tuned
+    # at 40 Hz as 0.5 m/s and 0.85 rad/s per scan); κ by (q_κ ⋅ the distance
+    # driven in the step)² [q_κ: 1/m²], as tuned per scan at 40 Hz.
+    q_e::Float64 = 0.079
+    q_ψ::Float64 = 0.134
     q_κ::Float64 = 0.8
     # How much a measurement goes stale per meter driven since its scan
     # (standard deviation): a profile's curvature [1/m] and widths [m] (on
@@ -263,18 +265,23 @@ function _lane_motion(x, v, r, dt, d, a)
     return [e + (v * sin(ψ) - d * r * cos(ψ)) * dt, ψ + (κ * v - r) * dt, κ, a[1] * x[4], a[2] * x[5], a[3] * x[6]]
 end
 
-# Unscented transform (α = 1, β = 2, κ = 0) of x, P through f, plus Q.
+# Unscented transform (α = 1, β = 2, κ = 0) of x, P through f, plus Q: the
+# 2n + 1 sigma points x and x ± the columns of √(nP), weighted 0 (mean) and
+# 2 (covariance) at x and 1/2n each elsewhere.
 function _ukf_predict(x, P, f, Q)
     n = length(x)
     L = cholesky(Symmetric(n * P + 1e-12I)).L
-    pts = vcat([x], [x + L[:, i] for i in 1:n], [x - L[:, i] for i in 1:n])
-    ys = [f(p) for p in pts]
-    w = fill(1 / (2n), 2n + 1)
-    w[1] = 0.0
-    m = sum(w[i] * ys[i] for i in eachindex(ys))
-    wc = copy(w)
-    wc[1] = 2.0
-    Pn = sum(wc[i] * (ys[i] - m) * (ys[i] - m)' for i in eachindex(ys)) + Q
+    Y = Matrix{Float64}(undef, n, 2n + 1)
+    Y[:, 1] = f(x)
+    for i in 1:n
+        Y[:, 1+i] = f(x .+ view(L, :, i))
+        Y[:, 1+n+i] = f(x .- view(L, :, i))
+    end
+    w = 1 / (2n)
+    m = w .* vec(sum(view(Y, :, 2:2n+1); dims=2))
+    D = Y .- m
+    D1, Dr = view(D, :, 1), view(D, :, 2:2n+1)
+    Pn = 2.0 .* (D1 * D1') .+ w .* (Dr * Dr') .+ Q
     return m, (Pn + Pn') / 2
 end
 
@@ -291,28 +298,29 @@ _lane_noise(c::TrackerConfig) = (c.noise.e, c.noise.ψe, c.noise.κ_profile)
 function _predict!(l::_Lane, c::TrackerConfig, ref, v, r, dt)
     l.ready || return l
     ns = _lane_noise(c)
-    a = [exp(-dt / n.τ) for n in ns]
-    Q = Diagonal([(c.q_e * dt)^2, (c.q_ψ * dt)^2, (c.q_κ * abs(v) * dt)^2,
-        (n.σ_bias^2 * (1 - a[k]^2) for (k, n) in enumerate(ns))...])
+    a = map(n -> exp(-dt / n.τ), ns)
+    q = map((n, ak) -> n.σ_bias^2 * (1 - ak^2), ns, a)
+    Q = Diagonal([c.q_e^2 * dt, c.q_ψ^2 * dt, (c.q_κ * abs(v) * dt)^2, q[1], q[2], q[3]])
     l.x, l.P = _ukf_predict(l.x, l.P, x -> _lane_motion(x, v, r, dt, ref, a), Q)
     return l
 end
 
 # Robust scalar update of component k with z = x_k (+ b_k for the car).
 function _update!(l::_Lane, k, z, R, ν, bias::Bool, robust::Bool)
-    H = zeros(6)
-    H[k] = 1.0
-    bias && (H[3+k] = 1.0)
-    pred = H' * l.x
+    x, P = l.x, l.P
+    pred = bias ? x[k] + x[3+k] : x[k]
     k == 2 && (z = pred + rem2pi(z - pred, RoundNearest))   # unwrap near the prediction
     y = z - pred
-    PH = l.P * H
-    S0 = H' * PH
+    PH = bias ? P[:, k] .+ P[:, 3+k] : P[:, k]   # P h
+    S0 = bias ? PH[k] + PH[3+k] : PH[k]          # h' P h
     Rr = _robust_R(R, y, S0 + R, ν, robust)
-    K = PH / (S0 + Rr)
-    l.x .+= K * y
-    l.P .-= K * PH'
-    l.P .= (l.P + l.P') / 2
+    g = 1 / (S0 + Rr)
+    for j in axes(P, 2)
+        x[j] += g * PH[j] * y
+        for i in axes(P, 1)
+            P[i, j] -= g * (PH[i] * PH[j])   # exactly symmetric
+        end
+    end
     return y^2 / (S0 + R)   # against the variance expected before down-weighting
 end
 
@@ -377,8 +385,14 @@ mutable struct _Step
     v::Float64                # speed and yaw rate used to predict into this step
     r::Float64
     prior::_State             # before this step's measurements
-    meas::Dict{Tuple{Symbol,Symbol},Measurement}   # by (estimate, tier)
+    meas::Matrix{Union{Nothing,Measurement}}   # by estimate (in ESTIMATES' order) and tier (small, large)
 end
+
+_Step(t, v, r, prior) = _Step(t, v, r, prior, Matrix{Union{Nothing,Measurement}}(nothing, length(ESTIMATES), 2))
+
+const _ORDER = (; (est => i for (i, est) in enumerate(ESTIMATES))...)
+_slot(est::Symbol, tier::Symbol) = (_ORDER[est], tier === :small ? 1 : 2)
+_get(step::_Step, est::Symbol, tier::Symbol) = step.meas[_slot(est, tier)...]
 
 # The variance and tail weight of a measurement entry.
 function _noise(c::TrackerConfig, est, tier, σ)
@@ -387,7 +401,6 @@ function _noise(c::TrackerConfig, est, tier, σ)
     return σ^2, n.ν_large, false
 end
 
-const _ORDER = Dict(est => i for (i, est) in enumerate(ESTIMATES))
 
 # The lane component (1: e, 2: ψe, 3: κ) the first entry of an estimate
 # measures; 0 for none.
@@ -397,7 +410,7 @@ _lane_k(est::Symbol) = haskey(_LANE_K, est) ? _LANE_K[est] : 0
 # Apply a step's measurements to state s; returns the e and ψe measurements'
 # normalized innovations (the larger of the two tiers').
 function _apply!(s::_State, c::TrackerConfig, step::_Step)
-    ms = sort(collect(values(step.meas)); by=m -> (_ORDER[m.estimate], m.tier === :small ? 0 : 1))
+    ms = Measurement[m for m in permutedims(step.meas) if m !== nothing]   # by estimate, the car's first
     used = s.lane.ready ? Set{Tuple{Symbol,Symbol}}() : _start_lane!(s, c, ms)
     paired = _inflate_paired!(s, c, step, used)
     nis = _update_all!(s, c, ms, used, paired)
@@ -435,7 +448,7 @@ function _inflate_paired!(s::_State, c::TrackerConfig, step::_Step, used)
     paired = Set{Symbol}()
     s.lane.ready || return paired
     for (est, k) in pairs(_LANE_K)
-        sm, lg = get(step.meas, (est, :small), nothing), get(step.meas, (est, :large), nothing)
+        sm, lg = _get(step, est, :small), _get(step, est, :large)
         (sm === nothing || lg === nothing) && continue
         ((est, :small) in used || (est, :large) in used) && continue
         Rs, _, _ = _noise(c, est, :small, sm.σ[1])
@@ -478,7 +491,7 @@ end
 # Every number both tiers measured at this scan: an observation of the car's bias.
 function _update_cell_biases!(s::_State, c::TrackerConfig, step::_Step)
     for est in (:κ_profile, :widths, :sight, :clearance)
-        small, large = get(step.meas, (est, :small), nothing), get(step.meas, (est, :large), nothing)
+        small, large = _get(step, est, :small), _get(step, est, :large)
         (small === nothing || large === nothing) && continue
         for j in eachindex(small.value)
             Rs, _, _ = _noise(c, est, :small, small.σ[j])
@@ -511,7 +524,7 @@ LaneTracker(ref_offset::Real; cfg::TrackerConfig=TrackerConfig()) =
 
 _find_step(tr::LaneTracker, t) = findlast(s -> abs(s.t - t) < 1e-6, tr.steps)
 # A step with e and ψe (from either tier).
-_measured(s::_Step) = any(k -> k[1] === :e, keys(s.meas)) && any(k -> k[1] === :ψe, keys(s.meas))
+_measured(s::_Step) = any(!isnothing, view(s.meas, _ORDER.e, :)) && any(!isnothing, view(s.meas, _ORDER.ψe, :))
 
 # Filter again from step `first` to the newest, into tr.state; returns the
 # normalized innovations of e and ψe at step `gate` (none for 0).
@@ -544,7 +557,7 @@ function track!(tr::LaneTracker, meas::AbstractVector{Measurement}, v::Real, yaw
     # a new step, predicted from the last (tr.state is replaced below, so it
     # becomes the step's prior without a copy)
     prior = isempty(tr.steps) ? tr.state : _predict!(tr.state, c, tr.ref_offset, v, r, t - tr.steps[end].t)
-    push!(tr.steps, _Step(t, v, r, prior, Dict{Tuple{Symbol,Symbol},Measurement}()))
+    push!(tr.steps, _Step(t, v, r, prior))
     length(tr.steps) > c.history && popfirst!(tr.steps)
 
     # file the measurements under their scans
@@ -552,7 +565,7 @@ function track!(tr::LaneTracker, meas::AbstractVector{Measurement}, v::Real, yaw
     for m in sort(meas; by=m -> m.scan_time)
         k = _find_step(tr, m.scan_time)
         k === nothing && continue   # older than the history
-        tr.steps[k].meas[(m.estimate, m.tier)] = m
+        tr.steps[k].meas[_slot(m.estimate, m.tier)...] = m
         first_changed, newest = min(first_changed, k), max(newest, k)
         tr.tiers[m.estimate] = m.tier
     end

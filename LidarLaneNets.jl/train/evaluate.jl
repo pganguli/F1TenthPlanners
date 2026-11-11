@@ -2,7 +2,7 @@
 # LidarLaneNets.NETWORKS) against the hand-written estimator
 # (LidarLaneEstimation.jl), on the tracks they never saw in training.
 #
-#     julia -t auto --project=. evaluate.jl      # prints, and writes results/networks.md
+#     julia -t auto --project=. evaluate.jl      # prints, and writes results/networks.md (and .toml)
 #
 # Per estimate and network:
 # - MACs: multiply-accumulates for one scan, counted layer by layer from the
@@ -23,6 +23,7 @@ using LinearAlgebra
 using Lux
 using Printf
 using StanleyController: Path, tracking_error
+using TOML
 
 include("common.jl")
 
@@ -106,6 +107,7 @@ function main()
     hand, none = hand_estimates(Xte)
 
     totals = Dict(name => [0, 0] for name in NETWORKS)
+    data = Dict{String,Any}()   # the numbers, for plots.jl: estimate => network set => …
     rows = ["| Estimate | Estimator | Weights | Beams in | MACs per scan | Parameters | Validation R² | " *
             "Test RMS error | Unit | Entries given | Within 1σ | Error correlation with large |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|"]
@@ -129,6 +131,9 @@ function main()
             totals[name] .+= (m, p)
             stats[name] = (m, p, 1 - sum(abs2, z) / length(z), rmse(err), mean(abs.(err) .<= σ[:, driving][M]))
         end
+        data[file_name(est)] = Dict(String(name) => Dict("macs" => stats[name][1], "parameters" => stats[name][2],
+            "validation_r2" => stats[name][3], "test_rmse" => stats[name][4], "within_1sigma" => stats[name][5])
+                                    for name in NETWORKS)
         for name in NETWORKS
             m, p, r2, e, cal = stats[name]
             file = basename(weights_file(WEIGHTS_DIR, est, name))
@@ -147,6 +152,7 @@ function main()
                        "$(commas(totals[name][1])) | $(commas(totals[name][2])) |")
     end
     mkpath(RESULTS_DIR)
+    open(io -> TOML.print(io, data; sorted=true), joinpath(RESULTS_DIR, "networks.toml"), "w")
     write(joinpath(RESULTS_DIR, "networks.md"), """
         # The networks: cost and accuracy
 

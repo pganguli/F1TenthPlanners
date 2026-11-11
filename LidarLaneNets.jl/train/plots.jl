@@ -1,5 +1,6 @@
-# Two plots of the networks, into results/ as PDF, from the tables that
-# evaluate.jl and errors.jl write there (run those first):
+# Two plots of the networks, into results/ as PDF, from the numbers that
+# evaluate.jl and errors.jl write there (networks.toml, errors.toml; run
+# those first):
 #
 # - accuracy_vs_macs.pdf: the test RMS error of every network, relative to
 #   the car's network (small_weak) for the same estimate, against its MACs
@@ -15,6 +16,7 @@
 
 using CairoMakie
 using LidarLaneNets
+using TOML
 
 include("tdist.jl")   # t_tail
 
@@ -28,25 +30,14 @@ const INK, INK2, GRID, SURFACE = colorant"#0b0b0b", colorant"#52514e", colorant"
 const MARKERS = Dict(:e => :circle, :ψe => :rect, :κ_profile => :utriangle, :widths => :diamond, :sight => :dtriangle,
     :clearance => :pentagon)
 
-# The table rows of a results file, as vectors of cells (the header and rule left out).
-function table_rows(file)
-    rows = Vector{String}[]
-    for l in eachline(joinpath(RESULTS_DIR, file))
-        startswith(l, "| `") || continue
-        push!(rows, strip.(split(strip(l, '|'), '|')))
-    end
-    return rows
+# A results file's numbers for every estimate and network set: (estimate, set) => Dict.
+function results(file)
+    d = TOML.parsefile(joinpath(RESULTS_DIR, file))
+    return Dict((est, s) => d[file_name(est)][String(s)] for est in ESTIMATES for s in NETWORKS)
 end
 
-estimate_of(cell) = Symbol(strip(cell, '`'))
-number(cell) = parse(Float64, replace(cell, "," => ""))
-
 function accuracy_vs_macs()
-    raw = Dict{Tuple{Symbol,Symbol},Tuple{Float64,Float64}}()   # (estimate, set) => (MACs, test RMS error)
-    for r in table_rows("networks.md")
-        r[2] == "hand-written" && continue
-        raw[(estimate_of(r[1]), Symbol(r[2]))] = (number(r[5]), number(r[8]))
-    end
+    raw = Dict(k => (Float64(v["macs"]), v["test_rmse"]) for (k, v) in results("networks.toml"))   # (MACs, test RMS error)
     # the error relative to the car's network for the same estimate; each
     # estimate nudged sideways (by up to ±20% in MACs), so markers at the same
     # spot stay apart
@@ -100,10 +91,7 @@ function t_halfwidth(s, ν, p)
 end
 
 function error_distributions()
-    fits = Dict{Tuple{Symbol,Symbol},NTuple{3,Float64}}()   # (estimate, set) => (μ, s, ν)
-    for r in table_rows("errors.md")
-        fits[(estimate_of(r[1]), Symbol(r[2]))] = (number(r[3]), number(r[4]), number(r[5]))
-    end
+    fits = Dict(k => (v["mu"], v["s"], v["nu"]) for (k, v) in results("errors.toml"))   # (μ, s, ν)
     fig = Figure(size=(900, 600), backgroundcolor=SURFACE, fontsize=12)
     Label(fig[0, 1:3], "The networks' errors: chance of an error larger than x (Student t fitted to each)";
         halign=:left, color=INK, fontsize=14)
