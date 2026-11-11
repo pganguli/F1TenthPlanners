@@ -3,18 +3,16 @@
 # Every scan, the small networks run on the car and give every estimate. A
 # schedule (see `CloudSchedule`) picks which estimates, if any, to also ask
 # the cloud's large networks for; each call is a cost. Their results come
-# back `remote_latency` seconds later (or never, with probability
-# `remote_drop`) and replace the small networks' results for that scan in the
-# tracker.
+# back `remote_latency` seconds later (or, with probability `remote_drop`,
+# none of a scan's do), marked with their scan's time; the tracker uses both tiers'
+# results for a scan (the cloud's reveal the small network's bias).
 #
 # Each result is checked before it is used:
 # - unsure: its mean standard deviation is above `max_σ`; a small result
 #   that is unsure is dropped, so the tracker only predicts that estimate.
 # - late: a large result older than `max_age` is dropped.
-# - disagreeing (off by default): a large result too far from the small one
-#   for the same scan (more than `agree` combined standard deviations, on the
-#   median entry) is dropped. The tracker uses such disagreement to learn the
-#   small network's bias, so it is kept unless `agree` is set.
+# A large result that disagrees with the small one is kept: the tracker
+# learns the small network's bias from the difference.
 
 """
     Measurement
@@ -116,12 +114,11 @@ Base.@kwdef struct SelectorConfig
     # From a scan to the cloud's results arriving: the uplink, the inference
     # and queueing, the downlink. One scan period at 40 Hz.
     remote_latency::Float64 = 0.025
-    remote_drop::Float64 = 0.0           # chance a call's results never arrive
+    remote_drop::Float64 = 0.0           # chance a scan's cloud request is lost (all its results)
     max_age::Float64 = 0.1               # cloud results older than this are not used
     # An estimate whose mean standard deviation is above this is "unsure"
     # (units as the estimate's).
-    max_σ::NamedTuple = (e=0.3, ψe=0.3, κ_profile=0.5, widths=1.0, sight=3.0, clearance=3.0)
-    agree::Float64 = Inf
+    max_σ::NamedTuple{ESTIMATES,NTuple{6,Float64}} = (e=0.3, ψe=0.3, κ_profile=0.5, widths=1.0, sight=3.0, clearance=3.0)
     # Whether the small networks' results are used at all. Without them, an
     # estimate is only predicted between cloud results: a car running on the
     # cloud alone (with `AllCalls`).
@@ -129,11 +126,13 @@ Base.@kwdef struct SelectorConfig
 end
 
 """
-    TieredEstimator(nets; schedule=RoundRobin(), cfg=SelectorConfig(), rng=Random.default_rng())
+    TieredEstimator(nets; schedule=RoundRobin(), cfg=SelectorConfig(), rng=nothing)
 
 Both tiers of networks (as from [`load_nets`](@ref); without `nets.large`,
 the cloud is never called) and the selector. Feed it every scan with
 [`observe!`](@ref). `calls` counts the cloud calls made for each estimate.
+`rng` draws the simulated network's dropouts (`nothing`: the default
+random generator).
 """
 mutable struct TieredEstimator{N}
     nets::N
@@ -141,13 +140,12 @@ mutable struct TieredEstimator{N}
     cfg::SelectorConfig
     rng::AbstractRNG
     pending::Vector{Tuple{Float64,Measurement}}   # (arrival time, result), in arrival order
-    recent_small::Dict{Tuple{Symbol,Float64},Measurement}   # small results by (estimate, scan time)
     calls::Dict{Symbol,Int}
 end
 
 TieredEstimator(nets; schedule::CloudSchedule=RoundRobin(), cfg::SelectorConfig=SelectorConfig(),
-                rng::AbstractRNG=Random.default_rng()) =
-    TieredEstimator(nets, schedule, cfg, rng, Tuple{Float64,Measurement}[], Dict{Tuple{Symbol,Float64},Measurement}(),
+                rng::Union{AbstractRNG,Nothing}=nothing) =
+    TieredEstimator(nets, schedule, cfg, something(rng, Random.default_rng()), Tuple{Float64,Measurement}[],
         Dict(est => 0 for est in ESTIMATES))
 
 """
@@ -161,11 +159,6 @@ _has_large(te::TieredEstimator) = hasproperty(te.nets, :large)
 
 _unsure(cfg::SelectorConfig, m::Measurement) = sum(m.σ) / length(m.σ) > cfg.max_σ[m.estimate]
 
-function _agrees(cfg::SelectorConfig, large::Measurement, small::Measurement)
-    z = [abs(large.value[i] - small.value[i]) / sqrt(large.σ[i]^2 + small.σ[i]^2) for i in eachindex(large.value)]
-    return median(z) <= cfg.agree
-end
-
 """
     observe!(te, ranges, t; lane=nothing, v=0.0, yaw_rate=0.0) -> Vector{Measurement}
 
@@ -178,14 +171,13 @@ small networks' for this scan, and any cloud results that have arrived by
 function observe!(te::TieredEstimator, ranges::AbstractVector{<:Real}, t::Real; lane=nothing, v=0.0, yaw_rate=0.0)
     cfg, out = te.cfg, Measurement[]
     t = Float64(t)
-    for est in ESTIMATES
-        μ, σ = predict(te.nets.small[est], ranges)
-        m = Measurement(est, t, :small, μ, σ)
-        te.recent_small[(est, t)] = m
-        cfg.use_small && !_unsure(cfg, m) && push!(out, m)
+    if cfg.use_small
+        for est in ESTIMATES
+            μ, σ = predict(te.nets.small[est], ranges)
+            m = Measurement(est, t, :small, μ, σ)
+            _unsure(cfg, m) || push!(out, m)
+        end
     end
-    # forget small results too old for any cloud result to be compared with
-    filter!(kv -> t - kv.first[2] <= cfg.max_age + 1e-9, te.recent_small)
 
     if _has_large(te)
         calls = cloud_calls(te.schedule, (; t, lane, v, yaw_rate))
@@ -199,10 +191,7 @@ function observe!(te::TieredEstimator, ranges::AbstractVector{<:Real}, t::Real; 
         while !isempty(te.pending) && te.pending[1][1] <= t + 1e-9
             _, m = popfirst!(te.pending)
             t - m.scan_time <= cfg.max_age + 1e-9 || continue
-            _unsure(cfg, m) && continue
-            small = get(te.recent_small, (m.estimate, m.scan_time), nothing)
-            (!cfg.use_small || small === nothing || _agrees(cfg, m, small)) || continue
-            push!(out, m)
+            _unsure(cfg, m) || push!(out, m)
         end
     end
     return out

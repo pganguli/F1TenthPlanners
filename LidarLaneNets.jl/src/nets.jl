@@ -26,22 +26,30 @@ const SMALL_STRONG_SPEC = (stride=4, channels=(8, 16, 16), dense=64)
 const SMALL_WEAK_SPEC = (stride=8, channels=(4, 8, 8), dense=32)
 
 """
-    NETWORKS
+    NETWORK_SETS, NETWORKS
 
-The trained network sets, named as their weight files are (`weights/<name>_<estimate>.jld2`):
+The trained network sets, named as their weight files are
+(`weights/<name>_<estimate>.jld2`), with each set's tier and the shape of
+its small networks (`spec`):
 
 - `:small_weak`: small networks of `SMALL_WEAK_SPEC`, for the car (the edge);
 - `:small_strong`: small networks of `SMALL_STRONG_SPEC`, for comparison;
 - `:large`: large networks for the cloud; each is a `:small_strong` network
-  plus a correction.
+  (its `base`) plus a correction.
 
-[`load_nets`](@ref) pairs `:small_weak` with `:large` by default.
+`NETWORKS` is their names. [`load_nets`](@ref) pairs `:small_weak` with
+`:large` by default.
 """
-const NETWORKS = (:small_weak, :small_strong, :large)
+const NETWORK_SETS = (
+    small_weak=(tier=:small, spec=SMALL_WEAK_SPEC),
+    small_strong=(tier=:small, spec=SMALL_STRONG_SPEC),
+    large=(tier=:large, spec=SMALL_STRONG_SPEC, base=:small_strong),
+)
+const NETWORKS = keys(NETWORK_SETS)
 
-network_tier(name::Symbol) = name === :large ? :large :
-                             name in (:small_weak, :small_strong) ? :small : throw(ArgumentError("unknown network set $name"))
-network_spec(name::Symbol) = name === :small_weak ? SMALL_WEAK_SPEC : SMALL_STRONG_SPEC
+_set(name::Symbol) = haskey(NETWORK_SETS, name) ? NETWORK_SETS[name] : throw(ArgumentError("unknown network set $name"))
+network_tier(name::Symbol) = _set(name).tier
+network_spec(name::Symbol) = _set(name).spec
 
 beam_stride(tier::Symbol; spec=SMALL_STRONG_SPEC) =
     tier === :small ? spec.stride : tier === :large ? 1 : throw(ArgumentError("unknown tier $tier"))
@@ -50,19 +58,26 @@ input_size(tier::Symbol, num_beams::Integer; spec=SMALL_STRONG_SPEC) = cld(num_b
 
 """
     scan_features(ranges, stride) -> Vector{Float32}
-    scan_features(ranges, tier)
+    scan_features(scans, stride) -> Matrix{Float32}
 
-A scan as a network's input: every `stride`-th beam (by default, the beams
-`tier` uses), each range clipped to `RANGE_MAX` (anything out of range or
-invalid reads as `RANGE_MAX`) and divided by it.
+A scan as a network's input: every `stride`-th beam (see [`input_stride`](@ref)),
+each range clipped to `RANGE_MAX` (anything out of range or invalid reads as
+`RANGE_MAX`) and divided by it. Given a matrix of scans (one per column),
+the features of each, in parallel.
 """
 scan_features(ranges::AbstractVector{<:Real}, stride::Integer) =
     Float32[_feature(ranges[i]) for i in 1:stride:length(ranges)]
-scan_features(ranges::AbstractVector{<:Real}, tier::Symbol) = scan_features(ranges, beam_stride(tier))
+
+function scan_features(scans::AbstractMatrix{<:Real}, stride::Integer)
+    F = Matrix{Float32}(undef, cld(size(scans, 1), stride), size(scans, 2))
+    Threads.@threads for j in axes(scans, 2)
+        scan_features!(F, view(scans, :, j), stride, j)
+    end
+    return F
+end
 
 """
     scan_features!(X, ranges, stride, j) -> X
-    scan_features!(X, ranges, tier, j)
 
 Write a scan's features into column `j` of `X`.
 """
@@ -72,8 +87,6 @@ function scan_features!(X::AbstractMatrix{Float32}, ranges::AbstractVector{<:Rea
     end
     return X
 end
-scan_features!(X::AbstractMatrix{Float32}, ranges::AbstractVector{<:Real}, tier::Symbol, j::Integer) =
-    scan_features!(X, ranges, beam_stride(tier), j)
 
 _feature(r::Real) = Float32(0 < r <= RANGE_MAX ? r / RANGE_MAX : 1.0)
 
@@ -209,16 +222,12 @@ function predict(net::EstimatorNet, ranges::AbstractVector{<:Real})
     return Float64.(vec(μ)), Float64.(vec(σ))
 end
 
-# File names avoid Unicode.
-const _FILE_NAMES = Dict(:e => "e", :ψe => "psi_e", :κ_profile => "kappa_profile", :widths => "widths",
-    :sight => "sight", :clearance => "clearance")
-
 """
     weights_file(dir, estimate, name) -> path
 
 Where the network for `estimate` of the set `name` (see [`NETWORKS`](@ref)) is saved.
 """
-weights_file(dir, estimate::Symbol, name::Symbol) = joinpath(dir, "$(name)_$(_FILE_NAMES[estimate]).jld2")
+weights_file(dir, estimate::Symbol, name::Symbol) = joinpath(dir, "$(name)_$(file_name(estimate)).jld2")
 
 """
     save_net(path, net)

@@ -26,6 +26,8 @@ end
     @testset "estimates" begin
         @test [output_size(est) for est in ESTIMATES] == [1, 1, NP, 2NP, 1, NK]
         @test_throws ArgumentError output_size(:speed)
+        @test file_name(:ψe) == "psi_e" && UNITS.κ_profile == "1/m"
+        @test_throws ArgumentError file_name(:speed)
         l = lane_labels(e=0.1, ψe=-0.2, κ_profile=fill(0.3, NP), w_left=fill(1.0, NP), w_right=fill(2.0, NP),
             sight=7.0, clearance=fill(4.0, NK))
         @test l.e == [0.1] && l.ψe == [-0.2] && l.sight == [7.0]
@@ -37,13 +39,14 @@ end
     @testset "scan features" begin
         r = fill(5.0, NB)
         r[1], r[5], r[9] = 65.533, NaN, 0.004
-        f = scan_features(r, :small)
+        f = scan_features(r, 4)
         @test length(f) == input_size(:small, NB) == 271
         @test f[1] == 1.0f0 && f[2] == 1.0f0 && f[3] ≈ 0.0004f0 && f[4] == 0.5f0
-        @test length(scan_features(r, :large)) == NB
+        @test length(scan_features(r, 1)) == NB
         X = zeros(Float32, 271, 2)
-        scan_features!(X, r, :small, 2)
+        scan_features!(X, r, 4, 2)
         @test X[:, 2] == f && all(iszero, X[:, 1])
+        @test scan_features(hcat(fill(2.0, NB), r), 4) == hcat(fill(0.2f0, 271), f)
     end
 
     @testset "networks" begin
@@ -82,6 +85,7 @@ end
         @test nets.small.e.spec == SMALL_WEAK_SPEC && nets.large.e.spec == SMALL_STRONG_SPEC
         @test load_nets(dir; small=:small_strong).small.sight.spec == SMALL_STRONG_SPEC
         @test_throws ArgumentError load_nets(dir; small=:large)
+        @test_throws ArgumentError network_spec(:medium)
         @test keys(nets) == TIERS && keys(nets.small) == ESTIMATES
         x = rand(Xoshiro(6), NB) .* 8
         @test predict(nets.large.ψe, x) == predict(EstimatorNet(:ψe, :large, NB; rng=Xoshiro(5)), x)
@@ -104,7 +108,7 @@ end
     @testset "selector" begin
         nets = (small=tier_nets(:small), large=tier_nets(:large; rng=Xoshiro(2)))
         trusting = (e=Inf, ψe=Inf, κ_profile=Inf, widths=Inf, sight=Inf, clearance=Inf)
-        cfg = SelectorConfig(max_σ=trusting, agree=Inf, remote_latency=0.05)
+        cfg = SelectorConfig(max_σ=trusting, remote_latency=0.05)
         te = TieredEstimator(nets; schedule=FixedCalls(:κ_profile, :sight), cfg)
         r = fill(3.0, NB)
         m0 = observe!(te, r, 0.0)
@@ -128,7 +132,7 @@ end
         @test isempty(lossy.pending) && lossy.calls[:e] == 1
 
         # results older than max_age are dropped
-        old = TieredEstimator(nets; schedule=AllCalls(), cfg=SelectorConfig(max_σ=trusting, agree=Inf, remote_latency=0.2))
+        old = TieredEstimator(nets; schedule=AllCalls(), cfg=SelectorConfig(max_σ=trusting, remote_latency=0.2))
         observe!(old, r, 0.0)
         @test isempty(filter(m -> m.tier === :large, observe!(old, r, 0.2)))
 
@@ -139,10 +143,9 @@ end
         @test !any(x -> x.estimate === :e, m) && length(m) == 5
         @test isempty(unsure.pending) && unsure.calls[:e] == 0
 
-        # a large result that disagrees with the small one is dropped
-        strict = TieredEstimator(nets; schedule=AllCalls(),
-            cfg=SelectorConfig(max_σ=trusting, agree=0.0, remote_latency=0.0))
-        @test isempty(filter(m -> m.tier === :large, observe!(strict, r, 0.0)))
+        # a large result that disagrees with the small one is kept (the tracker learns the bias from it)
+        both = TieredEstimator(nets; schedule=AllCalls(), cfg=SelectorConfig(max_σ=trusting, remote_latency=0.0))
+        @test length(filter(m -> m.tier === :large, observe!(both, r, 0.0))) == length(ESTIMATES)
     end
 
     @testset "tracker: follows the measurements" begin
@@ -273,6 +276,15 @@ end
         for k in 10:13   # the lane jumps 1 m: outliers until the filter restarts
             s = track!(tr, [meas(:e, 0.025k, :small, [1.0]), meas(:ψe, 0.025k, :small, [0.0])], 1.0, 0.0, 0.025k)
         end
+        @test s.e ≈ 1.0 atol = 0.05
+
+        # the same from the cloud alone, its results two scans late
+        tr = LaneTracker(0.257)
+        cloud(k, e) = [meas(:e, 0.025k, :large, [e]), meas(:ψe, 0.025k, :large, [0.0])]
+        for k in 0:14
+            s = track!(tr, k >= 2 ? cloud(k - 2, k - 2 < 10 ? 0.0 : 1.0) : Measurement[], 1.0, 0.0, 0.025k)
+        end
+        @test s.status !== :lost
         @test s.e ≈ 1.0 atol = 0.05
     end
 end

@@ -19,20 +19,12 @@
 #   a cloud result adds to the car's for the same scan.
 
 import LidarLaneEstimation as LLE
-using JLD2
-using LidarLaneNets
 using LinearAlgebra
 using Lux
 using Printf
-using Statistics
 using StanleyController: Path, tracking_error
 
-include("truth.jl")
-
-const DATA_DIR = joinpath(@__DIR__, "data")
-const WEIGHTS_DIR = joinpath(@__DIR__, "..", "weights")
-const RESULTS_DIR = joinpath(@__DIR__, "results")
-const UNITS = Dict(:e => "m", :ψe => "rad", :κ_profile => "1/m", :widths => "m", :sight => "m", :clearance => "m")
+include("common.jl")
 
 # NUC5 and its LiDAR, as in F1Tenth.jl: the front axle 0.013 m behind the LiDAR.
 const BEAMS = range(-3π / 4, 3π / 4; length=1081)
@@ -81,13 +73,6 @@ function hand_estimates(X)
     return out, none / N
 end
 
-# Scans, true estimates and the raw files of the tracks `names`.
-function load_all(names)
-    d = [load(joinpath(DATA_DIR, n * ".jld2")) for n in names]
-    X = reduce(hcat, (x["X"] for x in d))
-    return X, Dict(est => Float64.(reduce(hcat, (x["Y"][String(est)] for x in d))) for est in ESTIMATES), d
-end
-
 # MACs of a layer for an input of length L with C channels; returns (macs, L, C).
 macs(l::Conv, L, C) = (Lout = fld(L + sum(l.pad) - l.kernel_size[1], l.stride[1]) + 1;
     (Lout * l.out_chs * l.in_chs * l.kernel_size[1], Lout, l.out_chs))
@@ -108,29 +93,6 @@ function macs(p::Parallel, L, C)   # branches on the same input, outputs added
 end
 macs(net::EstimatorNet) = first(macs(net.model, input_size(net), 1))
 
-# The network's means and standard deviations for every scan in X.
-function means_sigmas(net, X)
-    F = Matrix{Float32}(undef, input_size(net), size(X, 2))
-    Threads.@threads for j in axes(X, 2)
-        scan_features!(F, view(X, :, j), input_stride(net), j)
-    end
-    n = output_size(net.estimate)
-    μ, σ = Matrix{Float64}(undef, n, size(X, 2)), Matrix{Float64}(undef, n, size(X, 2))
-    for idx in Iterators.partition(axes(X, 2), 4096)
-        m, s = predict(net, F[:, idx])
-        μ[:, idx], σ[:, idx] = m, s
-    end
-    return μ, σ
-end
-
-# Which entries count: profile entries the car can see (no farther than the true sight).
-function mask(est, Y)
-    visible = PROFILE_S .<= Y[:sight]   # (NP, N)
-    est === :κ_profile && return visible
-    est === :widths && return vcat(visible, visible)
-    return trues(size(Y[est]))
-end
-
 rmse(err) = isempty(err) ? NaN : sqrt(mean(abs2, err))
 commas(n) = replace(string(n), r"(?<=\d)(?=(\d{3})+$)" => ",")
 g(x; d=4) = isnan(x) ? "–" : string(round(x; sigdigits=d))
@@ -138,7 +100,7 @@ g(x; d=4) = isnan(x) ? "–" : string(round(x; sigdigits=d))
 function main()
     Xva, Yva, _ = load_all(VAL_TRACKS)
     Xte, Yte, dte = load_all(TEST_TRACKS)
-    driving = .!reduce(vcat, (x["static"] for x in dte))
+    driving = driving_scans(dte)
     Yd = Dict(k => v[:, driving] for (k, v) in Yte)
     println("test: $(size(Xte, 2)) scans ($(count(driving)) while driving); validation: $(size(Xva, 2))")
     hand, none = hand_estimates(Xte)

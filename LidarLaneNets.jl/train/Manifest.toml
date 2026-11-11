@@ -1502,7 +1502,7 @@ uuid = "df66ebbf-4f73-4268-99b2-bc89cfec981b"
 version = "0.1.0"
 
 [[deps.LidarLaneNets]]
-deps = ["JLD2", "LinearAlgebra", "Lux", "Random", "Statistics", "TOML"]
+deps = ["JLD2", "LinearAlgebra", "Lux", "Random", "TOML"]
 path = ".."
 uuid = "5dc702fd-b87c-461f-9115-a9161d1c12ca"
 version = "0.1.0"

@@ -28,6 +28,7 @@
 # results/runs-<small set>.csv, next to this script.
 
 include("race.jl")
+using SpecialFunctions: beta_inc
 
 const CONFIGS = [
     ("small only", NoCalls, true),
@@ -37,10 +38,17 @@ const CONFIGS = [
     ("far ahead", () -> FixedCalls(:κ_profile, :widths, :sight), true),
 ]
 
-# Two-sided 95% quantiles of Student's t, by degrees of freedom (normal past 30).
-const T95 = [12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145,
-    2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042]
-t95(df) = df <= 0 ? NaN : df <= length(T95) ? T95[df] : 1.96
+# The two-sided 95% quantile of Student's t with `df` degrees of freedom:
+# the t with P(|T| > t) = I_{df/(df+t²)}(df/2, 1/2) = 0.05, by bisection.
+function t95(df)
+    df <= 0 && return NaN
+    lo, hi = 0.0, 100.0
+    for _ in 1:100
+        mid = (lo + hi) / 2
+        beta_inc(df / 2, 0.5, df / (df + mid^2))[1] > 0.05 ? (lo = mid) : (hi = mid)
+    end
+    return (lo + hi) / 2
+end
 
 """
     ci(xs) -> (mean, half-width)
@@ -72,19 +80,25 @@ function compare(latencies_ms; seeds=5, weights=DEFAULT_WEIGHTS, small=:small_we
     suffix = "-$small"
     F1Tenth.THREAD_AGENTS[] = false
     runs = [(track, k) for track in TEST_TRACKS for k in 1:seeds]
-    # every configuration's results, run by run (same order as `runs`)
-    rows = Tuple{String,String,Vector{RunResult}}[]
-    for lat in latencies_ms, (name, schedule, use_small) in CONFIGS
-        lat != first(latencies_ms) && name == "small only" && continue   # no cloud, no latency
-        selector = SelectorConfig(remote_latency=lat / 1000, use_small=use_small)
-        results = Vector{RunResult}(undef, length(runs))
-        Threads.@threads :dynamic for i in eachindex(runs)
-            track, k = runs[i]
-            results[i] = run_map(track; nets, schedule, selector, tracking, seed=1000k, pose=start_pose(track, k, seeds))
-        end
-        push!(rows, (name, name == "small only" ? "–" : string(round(Int, lat)), results))
-        println(name, ", ", rows[end][2], " ms: ", count(r -> r.finished, results), " of ", length(results), " laps")
-        flush(stdout)
+    # every configuration (and latency) to run
+    configs = [(name, schedule, SelectorConfig(remote_latency=lat / 1000, use_small=use_small),
+        name == "small only" ? "–" : string(round(Int, lat)))
+               for lat in latencies_ms for (name, schedule, use_small) in CONFIGS
+               if lat == first(latencies_ms) || name != "small only"]   # no cloud, no latency
+    # every run of every configuration in one pool, so no thread waits for a
+    # configuration's slowest run (each run has its own seed: the results
+    # don't depend on the order)
+    jobs = [(c, i) for c in eachindex(configs) for i in eachindex(runs)]
+    results = Matrix{RunResult}(undef, length(runs), length(configs))
+    Threads.@threads :dynamic for j in eachindex(jobs)
+        c, i = jobs[j]
+        name, schedule, selector, _ = configs[c]
+        track, k = runs[i]
+        results[i, c] = run_map(track; nets, schedule, selector, tracking, seed=1000k, pose=start_pose(track, k, seeds))
+    end
+    rows = [(name, lat, results[:, c]) for (c, (name, _, _, lat)) in enumerate(configs)]
+    for (name, lat, rs) in rows
+        println(name, ", ", lat, " ms: ", count(r -> r.finished, rs), " of ", length(rs), " laps")
     end
     base = rows[1][3]   # small only
     out = joinpath(@__DIR__, "results")
@@ -95,7 +109,7 @@ function compare(latencies_ms; seeds=5, weights=DEFAULT_WEIGHTS, small=:small_we
     paired(rs, f) = ci([f(r) - f(b) for (r, b) in zip(rs, base)])
     pfmt(name, rs, f; d=2) = name == "small only" ? "–" : fmt(paired(rs, f)...; d)
     gap(r) = r.min_gap
-    close(r) = 100r.close
+    near(r) = 100r.close
     low(r) = 100r.low_ttc
     opt(r) = 100r.optimistic
     slip(r) = rad2deg(r.max_slip)
@@ -115,9 +129,9 @@ function compare(latencies_ms; seeds=5, weights=DEFAULT_WEIGHTS, small=:small_we
     for (name, lat, rs) in rows
         finite_ttc = [r.min_ttc for r in rs if isfinite(r.min_ttc)]
         push!(safety, "| $name | $lat | $(count(r -> r.crashed, rs)) | $(round(minimum(gap, rs); digits=2)) | " *
-                      "$(fmt(ci(gap.(rs))...)) | $(fmt(ci(close.(rs))...)) | $(fmt(ci(low.(rs))...)) | " *
+                      "$(fmt(ci(gap.(rs))...)) | $(fmt(ci(near.(rs))...)) | $(fmt(ci(low.(rs))...)) | " *
                       "$(fmt(ci(finite_ttc)...)) | $(fmt(ci(slip.(rs))...; d=1)) | $(fmt(ci(opt.(rs))...)) |")
-        name == "small only" || push!(vs_small, "| $name | $lat | $(pfmt(name, rs, gap)) | $(pfmt(name, rs, close)) | " *
+        name == "small only" || push!(vs_small, "| $name | $lat | $(pfmt(name, rs, gap)) | $(pfmt(name, rs, near)) | " *
                                                "$(pfmt(name, rs, low)) | $(pfmt(name, rs, slip; d=1)) | $(pfmt(name, rs, opt)) |")
         done = [r.sim_time for r in rs if r.finished]
         both = [100 * (r.sim_time / b.sim_time - 1) for (r, b) in zip(rs, base) if r.finished && b.finished]

@@ -32,8 +32,10 @@ using Printf
 using Random: Xoshiro
 
 const DEFAULT_WEIGHTS = joinpath(@__DIR__, "..", "..", "LidarLaneNets.jl", "weights")
-# The racetracks the networks never saw in training (as in LidarLaneNets.jl/train/truth.jl).
-const TEST_TRACKS = ["Spa", "Monza", "Silverstone", "Oschersleben", "YasMarina"]
+
+# The track split (TEST_TRACKS: never seen in training), centerlines, and the
+# walls' distances, shared with LidarLaneNets.jl's training.
+include(joinpath(@__DIR__, "..", "..", "LidarLaneNets.jl", "train", "tracks.jl"))
 
 const USAGE = """
 usage: race.jl MAP [options]
@@ -51,7 +53,8 @@ options:
   --cloud-only     use only the cloud's results (no small networks): with
                    --cloud all, a car running on the large networks alone
   --cloud-latency MS  from a scan to its cloud results [ms] (default 25)
-  --cloud-drop P   chance a call's results never arrive (default 0)
+  --cloud-drop P   chance a scan's cloud request is lost, with all its
+                   results (default 0)
   --small SET      the car's networks: small_weak (the default) or small_strong;
                    the cloud's are always the large set
   --weights DIR    where the networks are (default ../LidarLaneNets.jl/weights)
@@ -61,19 +64,6 @@ options:
   --map-ext EXT    image extension of a custom map (default .png)
   --render         watch it in real time in a window (needs a display)
 """
-
-"""
-    centerline(name) -> Union{Path,Nothing}
-
-The racetrack's centerline (used only for the start pose and the score).
-"""
-function centerline(name)
-    haskey(F1Tenth.RACETRACKS, name) || return nothing
-    dir = dirname(F1Tenth.racetrack_yaml(name))
-    rows = [parse.(Float64, split(l, ",")) for l in eachline(joinpath(dir, name * "_centerline.csv"))
-            if !startswith(l, "#") && !isempty(strip(l))]
-    return Path(getindex.(rows, 1), getindex.(rows, 2); closed=true)
-end
 
 """
     RunResult
@@ -139,41 +129,6 @@ function wall_gap(m::F1Tenth.MapData, x, y, θ, length, width)
     return gap
 end
 
-# Distance from (x, y) to the nearest wall [m] (0 off the map).
-function wall_distance(m::F1Tenth.MapData, x, y)
-    so, co = sincos(m.origin[3])
-    px, py = x - m.origin[1], y - m.origin[2]
-    col = floor(Int, (px * co + py * so) / m.resolution)
-    row = floor(Int, (-px * so + py * co) / m.resolution)
-    h, w = size(m.dt)
-    (0 <= col < w && 0 <= row < h) || return 0.0
-    return m.dt[row+1, col+1]
-end
-
-"""
-    arc_free(m, x, y, θ, κ, hw; limit=10) -> d
-
-The true free distance [m] along the arc of curvature κ leaving (x, y) in
-direction θ, keeping `hw` from the walls, over at most half a turn (and
-`limit`), from the map.
-"""
-function arc_free(m::F1Tenth.MapData, x, y, θ, κ, hw; limit=10.0)
-    limit = abs(κ) < 1e-6 ? limit : min(limit, π / abs(κ))
-    s = 0.0
-    while s < limit
-        if abs(κ) < 1e-6
-            px, py = x + s * cos(θ), y + s * sin(θ)
-        else
-            R = 1 / κ
-            px, py = x - R * sin(θ) + R * sin(θ + κ * s), y + R * cos(θ) - R * cos(θ + κ * s)
-        end
-        d = wall_distance(m, px, py) - hw
-        d <= 0 && return s
-        s += max(d, 0.02)   # an arc is at least as long as its chord
-    end
-    return limit
-end
-
 """
     run_map(map_name; nets, schedule, speed, laps, pose, map_ext, render, timestep, max_time, seed, racer...) -> RunResult
 
@@ -200,7 +155,7 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
     walls = env.sim.scan_simulator.map
     params = env.params
     car = CarParams(params)
-    controller = Racer(car, env.sim.agents[1].lidar.scan_angles, env.lidar_dist, nets; schedule=schedule(),
+    controller = Racer(car, env.sim.agents[1].lidar.scan_angles, nets; schedule=schedule(),
         tracking, rng=Xoshiro(seed), v_max=something(speed, car.speed_cmd_max), racer...)
 
     render && add_render_callback!(env, e -> render_callback(e, env, controller))
@@ -243,7 +198,7 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
             # time to collision if the car held the arc it is driving
             turning = abs(v) > 0.5 ? r / abs(v) : 0.0
             if v > 1.0
-                ttc = arc_free(walls, front_axle(x, y, θ, params.lf)..., θ, turning, hw) / v
+                ttc = arc_clearance(walls, front_axle(x, y, θ, params.lf)..., θ, turning, hw) / v
                 min_ttc = min(min_ttc, ttc)
                 ttc < LOW_TTC && (low_ttc += 1)
             end
@@ -253,7 +208,7 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
             if plan !== nothing
                 lx, ly, lθ = agent.scan_origin
                 fx, fy = front_axle(lx, ly, lθ, params.lf - env.lidar_dist)
-                true_free = max(arc_free(walls, fx, fy, lθ, turning, hw), arc_free(walls, fx, fy, lθ, plan.κ, hw))
+                true_free = max(arc_clearance(walls, fx, fy, lθ, turning, hw), arc_clearance(walls, fx, fy, lθ, plan.κ, hw))
                 planned += 1
                 min(plan.free, 10.0) > true_free + OPTIMISM && (optimistic += 1)
             end

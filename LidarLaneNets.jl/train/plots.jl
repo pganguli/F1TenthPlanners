@@ -15,7 +15,8 @@
 
 using CairoMakie
 using LidarLaneNets
-using SpecialFunctions: loggamma, beta_inc
+
+include("tdist.jl")   # t_tail
 
 const RESULTS_DIR = joinpath(@__DIR__, "results")
 
@@ -26,7 +27,6 @@ const SET_LABELS = Dict(:small_weak => "small_weak (car)", :small_strong => "sma
 const INK, INK2, GRID, SURFACE = colorant"#0b0b0b", colorant"#52514e", colorant"#e4e3df", colorant"#fcfcfb"
 const MARKERS = Dict(:e => :circle, :ψe => :rect, :κ_profile => :utriangle, :widths => :diamond, :sight => :dtriangle,
     :clearance => :pentagon)
-const UNITS = Dict(:e => "m", :ψe => "rad", :κ_profile => "1/m", :widths => "m", :sight => "m", :clearance => "m")
 
 # The table rows of a results file, as vectors of cells (the header and rule left out).
 function table_rows(file)
@@ -85,10 +85,6 @@ function accuracy_vs_macs()
     save(joinpath(RESULTS_DIR, "accuracy_vs_macs.pdf"), fig)
     return fig
 end
-
-t_pdf(x, μ, s, ν) = exp(loggamma((ν + 1) / 2) - loggamma(ν / 2) - 0.5log(ν * π) - log(s) -
-                        (ν + 1) / 2 * log1p(((x - μ) / s)^2 / ν))
-t_tail(q, s, ν) = (t = q / s; beta_inc(ν / 2, 0.5, ν / (ν + t^2))[1])   # P(|X − μ| > q)
 
 # The half-width holding probability p of a Student t (by bisection).
 function t_halfwidth(s, ν, p)

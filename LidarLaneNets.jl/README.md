@@ -63,7 +63,7 @@ using LidarLaneNets
 nets = load_nets("weights")      # (small=(e=…, …), large=(…)): small_weak on the car, large in the cloud
 est = TieredEstimator(nets; schedule=RoundRobin())
 noise = load_noise("weights")                     # measured for small_weak and large
-tracker = LaneTracker(0.257; cfg=TrackerConfig(noise))   # front axle 0.257 m ahead of the rear axle
+tracker = LaneTracker(0.257; cfg=TrackerConfig(; noise))   # front axle 0.257 m ahead of the rear axle
 
 # every scan, at time t [s], with the car's speed and yaw rate:
 meas = observe!(est, ranges, t; lane, v, yaw_rate)   # small results now, cloud results as they arrive
@@ -89,11 +89,12 @@ such type. `est.calls` counts the calls per estimate (the cost);
 `set_schedule!` changes the schedule.
 
 `SelectorConfig` sets the simulated network (`remote_latency`,
-`remote_drop`) and which results are used: a result is dropped if it is
-unsure (mean σ above `max_σ`), late (older than `max_age`), or, from the
-cloud, too far from the small result for the same scan (`agree` σ). With
-`use_small=false` the small results are never used: a car on the cloud
-alone.
+`remote_drop`: the chance a scan's cloud request is lost, with all its
+results) and which results are used: a result is dropped if it is unsure
+(mean σ above `max_σ`) or late (older than `max_age`). A cloud result that
+disagrees with the car's is kept: the filter learns the car's bias from the
+difference. With `use_small=false` the small results are never used: a car
+on the cloud alone.
 
 ### Combining the car's and the cloud's results
 

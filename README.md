@@ -14,6 +14,10 @@ its own package.
 | [StanleyController.jl](StanleyController.jl) | steers along a path with the Stanley method |
 | [LidarRacer.jl](LidarRacer.jl) | combines them to race an [F1Tenth.jl](https://github.com/pganguli/F1Tenth.jl) car (on this branch, with LidarLaneNets.jl) |
 
+The results of this branch (the car's and the cloud's networks, how they are
+combined, and their safety on held-out tracks) are summarized in
+[RESULTS.md](RESULTS.md).
+
 The trained weights (`LidarLaneNets.jl/weights/`) are stored with Git LFS:
 run `git lfs install` once before cloning, or `git lfs pull` after.
 

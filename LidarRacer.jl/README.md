@@ -34,10 +34,10 @@ car = CarParams(lf=0.130, lr=0.127, width=0.228, s_max=0.4189,
     steer_cmd_min=-0.327, steer_cmd_max=0.292, speed_cmd_max=14.375,
     decel_cmd=2.5, scan_rate=40.0, scan_range=10.0)
 
-# beam angles [rad], how far the LiDAR sits ahead of the center of gravity [m],
+# beam angles [rad] (the networks expect NUC5's LiDAR, 0.143 m ahead of the center of gravity),
 # the networks, and when to call the cloud
 nets = load_nets("../LidarLaneNets.jl/weights")   # small_weak on the car, large in the cloud
-racer = Racer(car, range(-3π / 4, 3π / 4; length=1081), 0.143, nets; schedule=RoundRobin())
+racer = Racer(car, range(-3π / 4, 3π / 4; length=1081), nets; schedule=RoundRobin())
 
 # on each new scan: measured speed and yaw rate, time since the last scan
 steer, speed, lane = control!(racer, ranges, v, yaw_rate, dt)
@@ -49,7 +49,7 @@ to use, the filter's tuning), and `stanley`, `margin`, `k_σ`, `latency` and
 `v_max` to replace its defaults (see `src/LidarRacer.jl`). `racer.plan`
 holds the last line planned, in the front axle's frame, and `racer.lane` the
 last lane state. When the lane is lost (no cross-track or heading error for
-10 scans), the car brakes to a stop and holds its steering.
+more than 10 scans), the car brakes to a stop and holds its steering.
 
 [`drive`](src/LidarRacer.jl) does everything after the estimates from any
 `LaneState`: the true one in a simulator, say (LidarLaneNets.jl's training
@@ -156,9 +156,9 @@ How close the car came to the walls, at 50 ms (a public cloud over 5G):
   approach is about twice the cloud alone's (0.19 m against 0.10 m at
   50 ms; 0.29–0.35 m against 0.10 m at 25 ms). The heading is tracked about
   a third more accurately than by either tier alone.
-- **Far ahead does it with half the cloud calls**, and it is the only
-  configuration that plans on too much free distance less often than the
-  car alone (4.8% of scans against 5.9% at 50 ms).
+- **Far ahead does it with half the cloud calls**, and it plans on too much
+  free distance less often than the car alone (4.8% of scans against 5.9%
+  at 50 ms), as the cloud alone does (5.2%).
 - **It gets worse as the cloud's latency grows.** At 100 ms every
   combination crashes on YasMarina like the car alone, and the cloud alone
   crashes twice on Monza.
@@ -171,10 +171,12 @@ How close the car came to the walls, at 50 ms (a public cloud over 5G):
 
 The combinations that call the cloud's clearance (for every estimate, and
 round robin) plan on too much free distance in more scans than the car
-alone: 6.5–8.0% against 5.9%.
+alone: 6.4–7.9% against 5.9%.
 
-Lap times barely differ between configurations that finish (75–78 s on
-average; the true estimates give 74.0 s).
+Lap times differ little (75–80 s on average over the laps finished; the
+true estimates give 74.0 s). The configurations finish different sets of
+laps (the car alone never finishes YasMarina), so compare them with the
+paired column of the full tables.
 
 For reference, the hand-written estimator on `main` laps these tracks in
 74.6 s on average (one seed), with its own planner, which plans out to 10 m

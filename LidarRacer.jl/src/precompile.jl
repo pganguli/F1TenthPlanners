@@ -11,7 +11,7 @@
     @compile_workload begin
         tier(t) = NamedTuple{ESTIMATES}(Tuple(EstimatorNet(est, t, length(beams)) for est in ESTIMATES))
         nets = (small=tier(:small), large=tier(:large))
-        racer = Racer(car, beams, 0.143, nets)
+        racer = Racer(car, beams, nets)
         for _ in 1:3
             control!(racer, lane, 5.0, 0.1, 0.025)
         end

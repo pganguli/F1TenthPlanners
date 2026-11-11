@@ -35,8 +35,8 @@
 #       dψe/dt = κ⋅v − r,   dκ/dt = 0 (changes count as noise)
 # - every entry of κ_profile, w_left, w_right, sight and clearance: the car's
 #   latest measurement less its bias (a Kalman filter on the bias alone, fed
-#   by the scans both tiers measured), combined with the cloud's latest; see
-#   `_Cells` below.
+#   by the scans both tiers measured), or the cloud's latest where the car has
+#   none; see `_Cells` below.
 #
 # Out of sequence: a result counts at the time of its scan. The tracker keeps
 # the last few scans' priors and measurements; a late cloud result is added to
@@ -79,9 +79,9 @@ The noise parameters measured for the network sets `small` (the car's) and
 """
 function load_noise(dir::AbstractString; small::Symbol=:small_weak, large::Symbol=:large)
     d = TOML.parsefile(joinpath(dir, "fusion.toml"))
-    get1(est) = (s = d[String(small)][_FILE_NAMES[est]];
+    get1(est) = (s = d[String(small)][file_name(est)];
         EstimateNoise(persist=s["persist"], τ=s["tau"], σ_bias=s["sigma_bias"], ν_small=s["nu"],
-            ν_large=d[String(large)][_FILE_NAMES[est]]["nu"]))
+            ν_large=d[String(large)][file_name(est)]["nu"]))
     return NamedTuple{ESTIMATES}(Tuple(get1(est) for est in ESTIMATES))
 end
 
@@ -109,7 +109,7 @@ Base.@kwdef struct TrackerConfig
     # from the measurements.
     gate::Float64 = 6.0
     max_outliers::Int = 3
-    noise::NamedTuple = default_noise()
+    noise::NamedTuple{ESTIMATES,NTuple{6,EstimateNoise}} = default_noise()
     robust::Bool = true      # Student-t updates (else Gaussian)
     history::Int = 10        # scans kept for late measurements
     lost_after::Int = 10     # scans without e or ψe before the lane is lost
@@ -308,12 +308,12 @@ function _update!(l::_Lane, k, z, R, ν, bias::Bool, robust::Bool)
     y = z - pred
     PH = l.P * H
     S0 = H' * PH
-    R = _robust_R(R, y, S0 + R, ν, robust)
-    K = PH / (S0 + R)
+    Rr = _robust_R(R, y, S0 + R, ν, robust)
+    K = PH / (S0 + Rr)
     l.x .+= K * y
     l.P .-= K * PH'
     l.P .= (l.P + l.P') / 2
-    return y^2 / (S0 + R)
+    return y^2 / (S0 + R)   # against the variance expected before down-weighting
 end
 
 # Start the lane from a scan's e, ψe (and κ, if given) measurements.
@@ -339,21 +339,26 @@ end
 
 const _CELLS = (:κ_profile, :w_left, :w_right, :sight, :clearance)
 
+const _CellSet = NamedTuple{_CELLS,NTuple{5,_Cells}}
+
 mutable struct _State
     lane::_Lane
-    cells::Dict{Symbol,_Cells}
+    cells::_CellSet
     odo::Float64              # distance driven [m]
 end
 
-Base.copy(s::_State) = _State(copy(s.lane), Dict(k => copy(v) for (k, v) in s.cells), s.odo)
+Base.copy(s::_State) = _State(copy(s.lane), map(copy, s.cells), s.odo)
 
-_cell_noise(c::TrackerConfig, k) = k === :w_left || k === :w_right ? c.noise.widths : c.noise[k]
+# The estimate a cell belongs to, and how many entries it has.
+_cell_estimate(k::Symbol) = k === :w_left || k === :w_right ? :widths : k
+_cell_size(k::Symbol) = k === :w_left || k === :w_right ? _NP : output_size(k)
+_cell_noise(c::TrackerConfig, k) = c.noise[_cell_estimate(k)]
 
-function _State(c::TrackerConfig)
-    n(k) = k === :sight ? 1 : k === :clearance ? length(CLEARANCE_K) : _NP
-    return _State(_Lane(false, zeros(6), zeros(6, 6)), Dict(k => _Cells(n(k), _cell_noise(c, k).σ_bias) for k in _CELLS),
-        0.0)
-end
+# The cell, and the entry in it, that entry j of estimate `est` goes to.
+_cell(est::Symbol, j::Integer) = est === :widths ? (j <= _NP ? (:w_left, j) : (:w_right, j - _NP)) : (est, j)
+
+_State(c::TrackerConfig) = _State(_Lane(false, zeros(6), zeros(6, 6)),
+    _CellSet(Tuple(_Cells(_cell_size(k), _cell_noise(c, k).σ_bias) for k in _CELLS)), 0.0)
 
 function _predict!(s::_State, c::TrackerConfig, ref, v, r, dt)
     s.odo += abs(v) * dt
@@ -373,7 +378,6 @@ mutable struct _Step
     r::Float64
     prior::_State             # before this step's measurements
     meas::Dict{Tuple{Symbol,Symbol},Measurement}   # by (estimate, tier)
-    start::Bool               # the lane (re)started here
 end
 
 # The variance and tail weight of a measurement entry.
@@ -385,60 +389,82 @@ end
 
 const _ORDER = Dict(est => i for (i, est) in enumerate(ESTIMATES))
 
-# Apply a step's measurements to state s; returns the e and ψe measurements' normalized innovations.
+# The lane component (1: e, 2: ψe, 3: κ) the first entry of an estimate
+# measures; 0 for none.
+const _LANE_K = (e=1, ψe=2, κ_profile=3)
+_lane_k(est::Symbol) = haskey(_LANE_K, est) ? _LANE_K[est] : 0
+
+# Apply a step's measurements to state s; returns the e and ψe measurements'
+# normalized innovations (the larger of the two tiers').
 function _apply!(s::_State, c::TrackerConfig, step::_Step)
     ms = sort(collect(values(step.meas)); by=m -> (_ORDER[m.estimate], m.tier === :small ? 0 : 1))
-    nis = Dict{Symbol,Float64}()
-    used = Set{Tuple{Symbol,Symbol}}()   # measurements the lane started from (not applied again)
-    if !s.lane.ready
-        lane_ms, from = Dict{Symbol,Any}(), Dict{Symbol,Tuple{Symbol,Symbol}}()
-        for m in ms   # the cloud's, if both (it comes later in the order)
-            comp = m.estimate === :κ_profile ? :κ : m.estimate
-            comp in _LANE || continue
-            R, _, bias = _noise(c, m.estimate, m.tier, m.σ[1])
-            lane_ms[comp] = (z=m.value[1], R, bias)
-            from[comp] = (m.estimate, m.tier)
-        end
-        if haskey(lane_ms, :e) && haskey(lane_ms, :ψe)
-            _start!(s.lane, c, lane_ms)
-            step.start = true
-            union!(used, values(from))
-        end
+    used = s.lane.ready ? Set{Tuple{Symbol,Symbol}}() : _start_lane!(s, c, ms)
+    paired = _inflate_paired!(s, c, step, used)
+    nis = _update_all!(s, c, ms, used, paired)
+    _update_cell_biases!(s, c, step)
+    return nis
+end
+
+# Start the lane from this step's e and ψe (and κ, if measured; the cloud's
+# where both tiers measured one). Returns the measurements it started from,
+# which are not applied again.
+function _start_lane!(s::_State, c::TrackerConfig, ms)
+    used = Set{Tuple{Symbol,Symbol}}()
+    lane_ms, from = Dict{Symbol,Any}(), Dict{Symbol,Tuple{Symbol,Symbol}}()
+    for m in ms   # the cloud's, if both (it comes later in the order)
+        k = _lane_k(m.estimate)
+        k == 0 && continue
+        comp = _LANE[k]
+        R, _, bias = _noise(c, m.estimate, m.tier, m.σ[1])
+        lane_ms[comp] = (z=m.value[1], R, bias)
+        from[comp] = (m.estimate, m.tier)
     end
-    # Where both tiers measured e, ψe or κ at this scan, their difference shows
-    # the car's bias. A difference larger than the filter expects is evidence
-    # of a larger bias, not of a wild cloud result: the bias's variance grows
-    # to match it, and the pair updates without down-weighting either.
+    if haskey(lane_ms, :e) && haskey(lane_ms, :ψe)
+        _start!(s.lane, c, lane_ms)
+        union!(used, values(from))
+    end
+    return used
+end
+
+# Where both tiers measured e, ψe or κ at this scan, their difference shows
+# the car's bias. A difference larger than the filter expects is evidence of
+# a larger bias, not of a wild cloud result: the bias's variance grows to
+# match it, and the pair updates without down-weighting either. Returns the
+# estimates paired so.
+function _inflate_paired!(s::_State, c::TrackerConfig, step::_Step, used)
     paired = Set{Symbol}()
-    if s.lane.ready
-        for (k, est) in ((1, :e), (2, :ψe), (3, :κ_profile))
-            sm, lg = get(step.meas, (est, :small), nothing), get(step.meas, (est, :large), nothing)
-            (sm === nothing || lg === nothing) && continue
-            ((est, :small) in used || (est, :large) in used) && continue
-            Rs, _, _ = _noise(c, est, :small, sm.σ[1])
-            Rl, _, _ = _noise(c, est, :large, lg.σ[1])
-            d = sm.value[1] - lg.value[1]
-            k == 2 && (d = rem2pi(d, RoundNearest))
-            excess = (d - s.lane.x[3+k])^2 - (s.lane.P[3+k, 3+k] + Rs + Rl)
-            excess > 0 && (s.lane.P[3+k, 3+k] += excess)
-            push!(paired, est)
-        end
+    s.lane.ready || return paired
+    for (est, k) in pairs(_LANE_K)
+        sm, lg = get(step.meas, (est, :small), nothing), get(step.meas, (est, :large), nothing)
+        (sm === nothing || lg === nothing) && continue
+        ((est, :small) in used || (est, :large) in used) && continue
+        Rs, _, _ = _noise(c, est, :small, sm.σ[1])
+        Rl, _, _ = _noise(c, est, :large, lg.σ[1])
+        d = sm.value[1] - lg.value[1]
+        k == 2 && (d = rem2pi(d, RoundNearest))
+        excess = (d - s.lane.x[3+k])^2 - (s.lane.P[3+k, 3+k] + Rs + Rl)
+        excess > 0 && (s.lane.P[3+k, 3+k] += excess)
+        push!(paired, est)
     end
+    return paired
+end
+
+# Every measurement: its first entry into the lane filter (e, ψe, κ), the
+# rest (and κ_profile's first) into the cells as the latest of its tier.
+function _update_all!(s::_State, c::TrackerConfig, ms, used, paired)
+    nis = Dict{Symbol,Float64}()
     for m in ms
-        est = m.estimate
+        est, k = m.estimate, _lane_k(m.estimate)
         for (j, val) in enumerate(m.value)
             R, ν, bias = _noise(c, est, m.tier, m.σ[j])
-            if est === :e || est === :ψe || (est === :κ_profile && j == 1)
-                if s.lane.ready && !((est, m.tier) in used)
-                    k = est === :e ? 1 : est === :ψe ? 2 : 3
-                    q = _update!(s.lane, k, val, R, ν, bias, c.robust && !(est in paired))
-                    m.tier === :small && k <= 2 && (nis[est] = q)
-                end
+            if j == 1 && k > 0 && s.lane.ready && !((est, m.tier) in used)
+                q = _update!(s.lane, k, val, R, ν, bias, c.robust && !(est in paired))
+                k <= 2 && (nis[est] = max(get(nis, est, 0.0), q))
             end
-            est in (:e, :ψe) && continue
-            cell, i = est === :widths ? (j <= _NP ? (:w_left, j) : (:w_right, j - _NP)) : (est, j)
-            cl = s.cells[cell]
+            (est === :e || est === :ψe) && continue
             isfinite(val) || continue
+            cell, i = _cell(est, j)
+            cl = s.cells[cell]
             if bias   # the car's
                 cl.zs[i], cl.Rs[i], cl.odo_s[i] = val, R, s.odo
             else
@@ -446,17 +472,21 @@ function _apply!(s::_State, c::TrackerConfig, step::_Step)
             end
         end
     end
-    # every number both tiers measured at this scan: an observation of the car's bias
+    return nis
+end
+
+# Every number both tiers measured at this scan: an observation of the car's bias.
+function _update_cell_biases!(s::_State, c::TrackerConfig, step::_Step)
     for est in (:κ_profile, :widths, :sight, :clearance)
         small, large = get(step.meas, (est, :small), nothing), get(step.meas, (est, :large), nothing)
         (small === nothing || large === nothing) && continue
         for j in eachindex(small.value)
             Rs, _, _ = _noise(c, est, :small, small.σ[j])
-            cell, i = est === :widths ? (j <= _NP ? (:w_left, j) : (:w_right, j - _NP)) : (est, j)
+            cell, i = _cell(est, j)
             _bias_update!(s.cells[cell], i, small.value[j] - large.value[j], Rs + large.σ[j]^2)
         end
     end
-    return nis
+    return s
 end
 
 """
@@ -480,7 +510,27 @@ LaneTracker(ref_offset::Real; cfg::TrackerConfig=TrackerConfig()) =
     LaneTracker(cfg, ref_offset, _Step[], _State(cfg), 0, typemax(Int) ÷ 2, Dict(est => :none for est in ESTIMATES))
 
 _find_step(tr::LaneTracker, t) = findlast(s -> abs(s.t - t) < 1e-6, tr.steps)
-_measured(s::_Step) = s.start || (any(k -> k[1] === :e, keys(s.meas)) && any(k -> k[1] === :ψe, keys(s.meas)))
+# A step with e and ψe (from either tier).
+_measured(s::_Step) = any(k -> k[1] === :e, keys(s.meas)) && any(k -> k[1] === :ψe, keys(s.meas))
+
+# Filter again from step `first` to the newest, into tr.state; returns the
+# normalized innovations of e and ψe at step `gate` (none for 0).
+function _replay!(tr::LaneTracker, first::Integer, gate::Integer)
+    c = tr.cfg
+    s = copy(tr.steps[first].prior)
+    nis = Dict{Symbol,Float64}()
+    for k in first:length(tr.steps)
+        step = tr.steps[k]
+        if k > first
+            s = _predict!(s, c, tr.ref_offset, step.v, step.r, step.t - tr.steps[k-1].t)
+            step.prior = copy(s)
+        end
+        q = _apply!(s, c, step)
+        k == gate && (nis = q)
+    end
+    tr.state = s
+    return nis
+end
 
 """
     track!(tr, measurements, v, yaw_rate, t) -> LaneState
@@ -491,51 +541,35 @@ the car's speed `v` [m/s] and yaw rate [rad/s], and return the lane now.
 function track!(tr::LaneTracker, meas::AbstractVector{Measurement}, v::Real, yaw_rate::Real, t::Real)
     c, t, v, r = tr.cfg, Float64(t), Float64(v), Float64(yaw_rate)
 
-    # a new step, predicted from the last
-    if isempty(tr.steps)
-        prior = copy(tr.state)
-    else
-        prior = _predict!(copy(tr.state), c, tr.ref_offset, v, r, t - tr.steps[end].t)
-    end
-    push!(tr.steps, _Step(t, v, r, prior, Dict{Tuple{Symbol,Symbol},Measurement}(), false))
+    # a new step, predicted from the last (tr.state is replaced below, so it
+    # becomes the step's prior without a copy)
+    prior = isempty(tr.steps) ? tr.state : _predict!(tr.state, c, tr.ref_offset, v, r, t - tr.steps[end].t)
+    push!(tr.steps, _Step(t, v, r, prior, Dict{Tuple{Symbol,Symbol},Measurement}()))
     length(tr.steps) > c.history && popfirst!(tr.steps)
 
     # file the measurements under their scans
-    first_changed = length(tr.steps)
+    first_changed, newest = length(tr.steps), 0
     for m in sort(meas; by=m -> m.scan_time)
         k = _find_step(tr, m.scan_time)
         k === nothing && continue   # older than the history
         tr.steps[k].meas[(m.estimate, m.tier)] = m
-        first_changed = min(first_changed, k)
+        first_changed, newest = min(first_changed, k), max(newest, k)
         tr.tiers[m.estimate] = m.tier
     end
 
     # filter again from the earliest scan that changed
-    s = copy(tr.steps[first_changed].prior)
-    nis = Dict{Symbol,Float64}()
-    for k in first_changed:length(tr.steps)
-        step = tr.steps[k]
-        if k > first_changed
-            s = _predict!(s, c, tr.ref_offset, step.v, step.r, step.t - tr.steps[k-1].t)
-            step.prior = copy(s)
-        end
-        step.start = false
-        nis = _apply!(s, c, step)
-    end
-    tr.state = s
+    nis = _replay!(tr, first_changed, newest)
 
-    # e or ψe far off, scan after scan: the lane changed; restart from the current scan
-    now = tr.steps[end]
+    # e or ψe far off at the newest scan measured, scan after scan: the lane
+    # changed; restart from that scan
     if get(nis, :e, 0.0) > c.gate^2 || get(nis, :ψe, 0.0) > c.gate^2
         tr.outliers += 1
         if tr.outliers >= c.max_outliers
-            fresh = copy(now.prior)
+            fresh = copy(tr.steps[newest].prior)
             fresh.lane.ready = false
-            now.prior = fresh
-            deleteat!(tr.steps, 1:length(tr.steps)-1)
-            s = copy(fresh)
-            _apply!(s, c, now)
-            tr.state = s
+            tr.steps[newest].prior = fresh
+            deleteat!(tr.steps, 1:newest-1)
+            _replay!(tr, 1, 0)
             tr.outliers = 0
         end
     else
@@ -558,10 +592,10 @@ function _lane_state(tr::LaneTracker)
     wr, _ = est(:w_right)
     sx, sv = est(:sight)
     cx, cv = est(:clearance)
-    known(x) = isfinite(x)
     return LaneState(s.lane.x[1], rem2pi(s.lane.x[2], RoundNearest), s.lane.x[3], κp, wl, wr,
-        known(sx[1]) ? clamp(sx[1], 0.0, SIGHT_MAX) : 0.0, known(sx[1]) ? sqrt(sv[1]) : Inf,
-        [known(x) ? clamp(x, 0.0, CLEARANCE_MAX) : 0.0 for x in cx], [known(x) ? sqrt(v) : Inf for (x, v) in zip(cx, cv)],
+        isfinite(sx[1]) ? clamp(sx[1], 0.0, SIGHT_MAX) : 0.0, isfinite(sx[1]) ? sqrt(sv[1]) : Inf,
+        [isfinite(x) ? clamp(x, 0.0, CLEARANCE_MAX) : 0.0 for x in cx],
+        [isfinite(x) ? sqrt(v) : Inf for (x, v) in zip(cx, cv)],
         NamedTuple{ESTIMATES}(Tuple(tr.tiers[est] for est in ESTIMATES)), status)
 end
 

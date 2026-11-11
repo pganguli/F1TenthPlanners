@@ -53,17 +53,33 @@ const ESTIMATES = (:e, :ψe, :κ_profile, :widths, :sight, :clearance)
 
 const _NP = length(PROFILE_S)
 
+# How many numbers each estimate is, and its name in file names (without Unicode).
+const _SIZES = (e=1, ψe=1, κ_profile=_NP, widths=2_NP, sight=1, clearance=length(CLEARANCE_K))
+const _FILE_NAMES = (e="e", ψe="psi_e", κ_profile="kappa_profile", widths="widths", sight="sight",
+    clearance="clearance")
+
+"""
+    UNITS
+
+The unit of each estimate, as `(e="m", ψe="rad", …)`.
+"""
+const UNITS = (e="m", ψe="rad", κ_profile="1/m", widths="m", sight="m", clearance="m")
+
+_check(est::Symbol) = est in ESTIMATES ? est : throw(ArgumentError("unknown estimate $est"))
+
 """
     output_size(estimate) -> n
 
 How many numbers an estimate is.
 """
-output_size(est::Symbol) =
-    est === :e || est === :ψe || est === :sight ? 1 :
-    est === :κ_profile ? _NP :
-    est === :widths ? 2_NP :
-    est === :clearance ? length(CLEARANCE_K) :
-    throw(ArgumentError("unknown estimate $est"))
+output_size(est::Symbol) = _SIZES[_check(est)]
+
+"""
+    file_name(estimate) -> String
+
+The estimate's name in file names and in `fusion.toml` (no Unicode): `"psi_e"` for `:ψe`, say.
+"""
+file_name(est::Symbol) = _FILE_NAMES[_check(est)]
 
 """
     LaneLabels

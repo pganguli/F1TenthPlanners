@@ -25,20 +25,14 @@
 # first. small_weak (for the car) is used with the same large networks (for
 # the cloud): the cloud needs only the scan.
 
-using JLD2
-using LidarLaneNets
 using LinearAlgebra
 using Lux
 using Optimisers
 using Printf
 using Random
-using Statistics
 using Zygote
 
-include("truth.jl")   # the track split (and F1Tenth.RACETRACKS)
-
-const DATA_DIR = joinpath(@__DIR__, "data")
-const WEIGHTS_DIR = joinpath(@__DIR__, "..", "weights")
+include("common.jl")   # the track split, where things are, load_all
 
 # Load a GPU backend if one is installed here; MLDataDevices picks it up.
 for pkg in (:LuxCUDA, :AMDGPU, :Metal)
@@ -57,27 +51,8 @@ const BATCH = 256
 const LR = (small=1e-3, large=3e-4)
 const β = 0.5f0
 
-"""
-    load_split(names) -> (X, Y)
-
-Raw scans (`(beams, N)`) and the true estimates (a Dict of `(n_out, N)`)
-from the tracks `names`.
-"""
-function load_split(names)
-    parts = [load(joinpath(DATA_DIR, n * ".jld2")) for n in names]
-    X = reduce(hcat, (p["X"] for p in parts))
-    Y = Dict(est => reduce(hcat, (p["Y"][String(est)] for p in parts)) for est in ESTIMATES)
-    return X, Y
-end
-
-function features(X::AbstractMatrix, name::Symbol)
-    stride = beam_stride(network_tier(name); spec=network_spec(name))
-    F = Matrix{Float32}(undef, cld(size(X, 1), stride), size(X, 2))
-    Threads.@threads for j in axes(X, 2)
-        scan_features!(F, view(X, :, j), stride, j)
-    end
-    return F
-end
+# The features of every scan in X for the network set `name`.
+features(X::AbstractMatrix, name::Symbol) = scan_features(X, beam_stride(network_tier(name); spec=network_spec(name)))
 
 """
     mirror!(est, Y) -> Y
@@ -132,7 +107,7 @@ function train_one(est, name, Ftr, Ytr, Fva, Yva; dev, epochs, rng=Xoshiro(42))
         net = EstimatorNet(est, tier, 1081; spec, rng, y_mean, y_std)
     else
         # the trained small network, plus a correction that starts at zero
-        net = large_from_small(load_net(weights_file(WEIGHTS_DIR, est, :small_strong)); rng)
+        net = large_from_small(load_net(weights_file(WEIGHTS_DIR, est, NETWORK_SETS[name].base)); rng)
         y_mean, y_std = net.y_mean, net.y_std
     end
     norm(Y) = (Y .- y_mean) ./ y_std
@@ -188,8 +163,8 @@ function main(args=ARGS)
     dev = gpu_device()
     BLAS.set_num_threads(Threads.nthreads())
     println("device: ", dev, ", threads: ", Threads.nthreads())
-    Xtr, Ytr = load_split(TRAIN_TRACKS)
-    Xva, Yva = load_split(VAL_TRACKS)
+    Xtr, Ytr, _ = load_all(TRAIN_TRACKS; T=nothing)
+    Xva, Yva, _ = load_all(VAL_TRACKS; T=nothing)
     println("train: $(size(Xtr, 2)) scans from $(length(TRAIN_TRACKS)) tracks; validation: $(size(Xva, 2)) from ",
         join(VAL_TRACKS, ", "))
     for name in sets

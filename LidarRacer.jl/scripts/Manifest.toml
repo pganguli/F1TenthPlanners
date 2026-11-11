@@ -2,7 +2,7 @@
 
 julia_version = "1.13.0"
 manifest_format = "2.1"
-project_hash = "957659c0e9e35b2bd474f8fafa6cb7aafc2f96f6"
+project_hash = "896fca977701f03cf72bf32886c6f1228c827103"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -1382,7 +1382,7 @@ uuid = "38a345b3-de98-5d2b-a5d3-14cd9215e700"
 version = "2.42.4+0"
 
 [[deps.LidarLaneNets]]
-deps = ["JLD2", "LinearAlgebra", "Lux", "Random", "Statistics", "TOML"]
+deps = ["JLD2", "LinearAlgebra", "Lux", "Random", "TOML"]
 path = "../../LidarLaneNets.jl"
 uuid = "5dc702fd-b87c-461f-9115-a9161d1c12ca"
 version = "0.1.0"

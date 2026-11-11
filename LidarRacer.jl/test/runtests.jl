@@ -8,7 +8,6 @@ const CAR = (lf=0.130, lr=0.127, width=0.228, s_max=0.4189, steer_cmd_min=-0.327
     steer_cmd_max=0.2917771883, speed_cmd_max=14.375, decel_cmd=2.5, scan_rate=40.0, scan_range=10.0,
     mass=3.9)                                       # an extra field, ignored
 const BEAMS = range(-3π / 4, 3π / 4; length=1081)  # a Hokuyo UST-10LX
-const LIDAR_DIST = 0.143                            # LiDAR ahead of the center of gravity
 const NP = length(PROFILE_S)
 const NK = length(CLEARANCE_K)
 
@@ -44,11 +43,11 @@ planner(; kwargs...) = Planner(CarParams(CAR); sweep=0.75 / CAR.scan_rate, kwarg
     end
 
     @testset "Racer timing" begin
-        r = Racer(CAR, BEAMS, LIDAR_DIST, NETS)
+        r = Racer(CAR, BEAMS, NETS)
         @test r.sweep ≈ 0.75 / CAR.scan_rate   # 270° of a 360° sweep
         @test r.latency == 0.0075
         @test r.planner.speed.v_max == CAR.speed_cmd_max
-        @test Racer(CAR, BEAMS, LIDAR_DIST, NETS; v_max=3.0, latency=0.02).planner.speed.v_max == 3.0
+        @test Racer(CAR, BEAMS, NETS; v_max=3.0, latency=0.02).planner.speed.v_max == 3.0
     end
 
     @testset "lane center from the estimates" begin
@@ -113,7 +112,7 @@ planner(; kwargs...) = Planner(CarParams(CAR); sweep=0.75 / CAR.scan_rate, kwarg
     @testset "the whole controller" begin
         ranges = [abs(sin(a)) < 1e-3 || 1 / abs(sin(a)) > 10 ? 65.533 : 1 / abs(sin(a)) for a in BEAMS]
         trusting = (e=Inf, ψe=Inf, κ_profile=Inf, widths=Inf, sight=Inf, clearance=Inf)
-        r = Racer(CAR, BEAMS, LIDAR_DIST, NETS; selector=SelectorConfig(max_σ=trusting, agree=Inf))
+        r = Racer(CAR, BEAMS, NETS; selector=SelectorConfig(max_σ=trusting))
         local steer, speed, s
         for _ in 1:5
             steer, speed, s = control!(r, ranges, 3.0, 0.0, 0.025)
@@ -123,7 +122,7 @@ planner(; kwargs...) = Planner(CarParams(CAR); sweep=0.75 / CAR.scan_rate, kwarg
         @test r.t ≈ 0.125
         # nothing it trusts: the lane is never found, so it stops
         never = (e=0.0, ψe=0.0, κ_profile=0.0, widths=0.0, sight=0.0, clearance=0.0)
-        r = Racer(CAR, BEAMS, LIDAR_DIST, NETS; selector=SelectorConfig(max_σ=never))
+        r = Racer(CAR, BEAMS, NETS; selector=SelectorConfig(max_σ=never))
         steer, speed, s = control!(r, ranges, 3.0, 0.0, 0.025)
         @test s.status === :lost && speed == 0 && steer == 0
     end

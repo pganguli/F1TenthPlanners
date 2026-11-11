@@ -13,8 +13,12 @@
 #   σ (a tail weight for the robust updates).
 # For the large (cloud) set, nu alone.
 
-include("errors.jl")   # data, means_sigmas, mask, fit_t
+using Printf
+using Random
 using TOML
+
+include("common.jl")
+include("tdist.jl")   # fit_t
 
 const LAGS = 1:20
 const DT = 0.025
@@ -88,7 +92,7 @@ function main()
             else
                 @printf("%-12s %-10s nu %.3g\n", name, est, ν)
             end
-            section[LidarLaneNets._FILE_NAMES[est]] = entry
+            section[file_name(est)] = entry
         end
         out[String(name)] = section
     end

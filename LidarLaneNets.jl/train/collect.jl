@@ -14,13 +14,10 @@
 # The data is deterministic: the same code gives the same files (each track
 # has its own fixed seed), so it is regenerated rather than committed.
 
-include("truth.jl")
-using JLD2
+include("truth.jl")   # the true estimates; common.jl: the tracks, DATA_DIR
 using LidarRacer
 using Printf
 using Random
-
-const DATA_DIR = joinpath(@__DIR__, "data")
 
 # Ornstein-Uhlenbeck noise: wanders with standard deviation σ, changing over about τ seconds.
 mutable struct Wander
