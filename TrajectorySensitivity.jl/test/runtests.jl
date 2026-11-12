@@ -169,6 +169,35 @@ straight_lane(; e=0.0, ψe=0.0) = lane_labels(; e, ψe, κ_profile=zeros(NP), w_
         @test seg["b"] ≈ 0.3 atol = 0.01
     end
 
+    @testset "linear analysis" begin
+        Z = box([1.0, 2.0])
+        @test widths(Z) == [2.0, 4.0]
+        @test widths(linear_map([1.0 1.0], Z)) == [6.0]
+        lo, hi = interval_hull(minkowski_sum(Z, Zonotope([1.0, 0.0], [0.5 0.0; 0.0 0.0])))
+        @test lo == [-0.5, -2.0] && hi == [2.5, 2.0]
+        @test jacobian(x -> [x[1]^2, x[1] * x[2]], [3.0, 2.0]) ≈ [6.0 0.0; 2.0 3.0] atol = 1e-6
+
+        # ẋ = −x + u, sampled every 0.1 s, the input 0.15 s late: one whole step, then 0.05 s
+        Φ, Γold, Γnew, Γw, steps = discretize(fill(-1.0, 1, 1), fill(1.0, 1, 1), fill(2.0, 1, 1), 0.1, 0.15)
+        @test steps == 1
+        @test Φ[1] ≈ exp(-0.1)
+        @test Γnew[1] ≈ 1 - exp(-0.05)
+        @test Γold[1] ≈ exp(-0.05) * (1 - exp(-0.05))
+        @test Γold[1] + Γnew[1] ≈ 1 - exp(-0.1)
+        @test Γw[1] ≈ 2(1 - exp(-0.1))
+
+        @test stable(fill(0.5, 1, 1)) && !stable(fill(1.01, 1, 1))
+        # a constant bias in [-1, 1] settles x' = 0.5x + b within ±2; x' = -0.5x + b within ±2/3
+        @test widths(bias_set(fill(0.5, 1, 1), fill(1.0, 1, 1), fill(1.0, 1, 1), [1.0])) ≈ [4.0]
+        @test widths(bias_set(fill(-0.5, 1, 1), fill(1.0, 1, 1), fill(1.0, 1, 1), [1.0])) ≈ [4 / 3]
+        # a disturbance changing every step reaches ±Σ|aᵏ| = ±2 either way
+        @test widths(disturbance_set(fill(0.5, 1, 1), fill(1.0, 1, 1), fill(1.0, 1, 1), [1.0])) ≈ [4.0] rtol = 1e-6
+        @test widths(disturbance_set(fill(-0.5, 1, 1), fill(1.0, 1, 1), fill(1.0, 1, 1), [1.0])) ≈ [4.0] rtol = 1e-6
+        # a delayed input: reaching the output only after a few steps
+        A = [0.0 0.0 0.0; 1.0 0.0 0.0; 0.0 1.0 0.5]
+        @test widths(disturbance_set(A, [1.0, 0.0, 0.0][:, :], [0.0 0.0 1.0], [1.0])) ≈ [4.0] rtol = 1e-6
+    end
+
     @testset "tracks" begin
         # a rounded rectangle: two free straights, one free corner
         p = vcat(straight(NaN; width=2.0, label="long straight"), corner(0.5, π / 2; width=2.0, label="corner"),

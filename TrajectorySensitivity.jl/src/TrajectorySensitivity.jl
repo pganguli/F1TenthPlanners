@@ -17,7 +17,10 @@ networks. One estimate is changed at a time; the others stay true.
 - [`TrajectoryLog`](@ref), [`compare`](@ref), [`tube`](@ref): the
   trajectory, against the reference;
 - [`TrackDesign`](@ref), [`build_track`](@ref): a track built from
-  segments, as a map and centerline.
+  segments, as a map and centerline;
+- [`Zonotope`](@ref), [`discretize`](@ref), [`bias_set`](@ref),
+  [`disturbance_set`](@ref): the closed loop linearized about one
+  situation, and the sets a bias or a late estimate lets it reach.
 """
 module TrajectorySensitivity
 
@@ -36,11 +39,14 @@ export Perturbation, reference, accuracy, latency, describe, oracle_racer
 export TrajectoryLog, log!, distance_driven, along, Comparison, compare, tube, by_segment
 export Piece, straight, bends, corner, spiral, TrackDesign, BuiltTrack, build_track, track_problems, track_map,
     write_track, read_segments
+export Zonotope, box, linear_map, minkowski_sum, interval_hull, widths, jacobian, discretize, stable, bias_set,
+    disturbance_set
 
 include("errors.jl")
 include("oracle.jl")
 include("experiments.jl")
 include("trajectory.jl")
 include("track.jl")
+include("linear.jl")
 
 end # module

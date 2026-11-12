@@ -110,9 +110,32 @@ From [scripts/](scripts/), set up once with
 | [`track.jl`](scripts/track.jl) | builds the representative track, with every kind of situation of the 23 f1tenth_racetracks tracks, and compares their geometry | `track/`, `results/track.md` |
 | [`sensitivity.jl`](scripts/sensitivity.jl) | the reference, and both tests for every estimate (`julia -t auto --project=. sensitivity.jl`) | `results/sensitivity.md`, `runs.csv` (`runs.jld2`, `tubes.jld2`: every trajectory, not committed) |
 | [`plots.jl`](scripts/plots.jl) | plots them | `results/accuracy.png`, `latency.png`, `along_track.png` |
+| [`analytic.jl`](scripts/analytic.jl) | the same questions from the linearized closed loop, without simulation or map (see below) | `results/analytic.md` |
 | [`validate.jl`](scripts/validate.jl) | a check outside the analysis: the real networks (car alone, cloud alone) on the same track | `results/validate.md` |
 
 The results are in [scripts/results/sensitivity.md](scripts/results/sensitivity.md).
+
+## Without simulation
+
+[`analytic.jl`](scripts/analytic.jl) asks the same questions without a
+simulator or a map. It linearizes the closed loop about one situation: the
+car in steady state on a lane of constant curvature, with the lane's center
+line, walls and what the LiDAR sees computed from the geometry. The pieces:
+
+- the car (F1Tenth.jl's `vehicle_dynamics_st`), the servo and the VESC
+  speed loop, sampled every scan with the command delay;
+- LidarRacer.jl's `drive`, by its exact Jacobian, fed the estimates
+  directly, with no Kalman filter and no age limit on late results.
+
+It then computes the sets the loop can reach (`Zonotope`):
+
+- **accuracy**: the final set for a constant bias anywhere in a box (± the
+  car network's median error), as `bias_set` computes it;
+- **latency**: the set of the difference a delay of n scans makes, over
+  every road whose curvature varies within the racetracks' statistics, as
+  `disturbance_set` computes it, plus the delay margin.
+
+Results: [scripts/results/analytic.md](scripts/results/analytic.md).
 
 ## Limits
 
