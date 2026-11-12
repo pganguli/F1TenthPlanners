@@ -13,6 +13,7 @@ its own package.
 | [VelocityProfilePlanner.jl](VelocityProfilePlanner.jl) | sets the speed along a path by the forward-backward method |
 | [StanleyController.jl](StanleyController.jl) | steers along a path with the Stanley method |
 | [LidarRacer.jl](LidarRacer.jl) | combines them to race an [F1Tenth.jl](https://github.com/pganguli/F1Tenth.jl) car (on this branch, with LidarLaneNets.jl) |
+| [TrajectorySensitivity.jl](TrajectorySensitivity.jl) | how much each estimate's errors and delays move the car's trajectory, through the whole pipeline, with the networks replaced by an oracle |
 
 The results of this branch (the car's and the cloud's networks, how they are
 combined, and their safety on held-out tracks) are summarized in

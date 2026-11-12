@@ -28,6 +28,7 @@ jobs:
           - LidarRacer.jl
           - MinimumCurvaturePlanner.jl
           - StanleyController.jl
+          - TrajectorySensitivity.jl
           - VelocityProfilePlanner.jl
         version:
           - '1.10'
@@ -36,8 +37,12 @@ jobs:
         exclude:
           - package: LidarRacer.jl # its [sources] need Julia 1.11
             version: '1.10'
+          - package: TrajectorySensitivity.jl # likewise
+            version: '1.10'
         include:
           - package: LidarRacer.jl
+            version: '1.11'
+          - package: TrajectorySensitivity.jl
             version: '1.11'
     steps:
       - uses: actions/checkout@v6

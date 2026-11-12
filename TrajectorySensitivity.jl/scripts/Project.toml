@@ -1,0 +1,25 @@
+[deps]
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+F1Tenth = "ec9dc3f2-e932-4b18-a493-a4686694dcbe"
+FileIO = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+LidarLaneNets = "5dc702fd-b87c-461f-9115-a9161d1c12ca"
+LidarRacer = "e7940826-cef1-434a-86be-118e8a8d05da"
+MinimumCurvaturePlanner = "267b4fd1-97d5-44e8-be58-380e88c1ca66"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
+StanleyController = "6c722594-8a4a-4272-af8d-909386d35611"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+TrajectorySensitivity = "d9e5c541-2941-4f67-866a-0ace998c5123"
+VelocityProfilePlanner = "e0ccf83b-6183-451d-b977-c2d11878aa67"
+
+[sources]
+F1Tenth = {rev = "cbab51fe563e0626c0b295cae7abe3222939c8fe", url = "https://github.com/pganguli/F1Tenth.jl"}
+LidarLaneNets = {path = "../../LidarLaneNets.jl"}
+LidarRacer = {path = "../../LidarRacer.jl"}
+MinimumCurvaturePlanner = {path = "../../MinimumCurvaturePlanner.jl"}
+StanleyController = {path = "../../StanleyController.jl"}
+TrajectorySensitivity = {path = ".."}
+VelocityProfilePlanner = {path = "../../VelocityProfilePlanner.jl"}

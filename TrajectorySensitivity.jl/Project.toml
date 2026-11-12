@@ -1,0 +1,35 @@
+name = "TrajectorySensitivity"
+uuid = "d9e5c541-2941-4f67-866a-0ace998c5123"
+version = "0.1.0"
+authors = ["Prateek Ganguli <prateek.ganguli@gmail.com>"]
+
+[deps]
+LidarLaneNets = "5dc702fd-b87c-461f-9115-a9161d1c12ca"
+LidarRacer = "e7940826-cef1-434a-86be-118e8a8d05da"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
+StanleyController = "6c722594-8a4a-4272-af8d-909386d35611"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+
+[sources]
+LidarLaneNets = {path = "../LidarLaneNets.jl"}
+LidarRacer = {path = "../LidarRacer.jl"}
+StanleyController = {path = "../StanleyController.jl"}
+
+[compat]
+LidarLaneNets = "0.1"
+LidarRacer = "0.1"
+LinearAlgebra = "1"
+Random = "1"
+SpecialFunctions = "2"
+StanleyController = "0.1"
+TOML = "1"
+Test = "1"
+julia = "1.11"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
