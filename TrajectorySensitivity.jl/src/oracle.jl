@@ -23,15 +23,17 @@ The true estimates (a `LaneLabels`) of the scan taken at time `t` [s].
 set_truth!(o::Oracle, labels::LaneLabels, t::Real) = (o.labels = labels; o.t = Float64(t); o)
 
 """
-    OracleNet(oracle, estimate; draws=nothing, gain=1.0, σ_min, silent=false)
+    OracleNet(oracle, estimate; draws=nothing, role=:car, gain=1.0, σ_min, silent=false)
 
 Stands in for the network of one estimate, wherever LidarLaneNets.jl takes
 a network (`predict(net, ranges)`, which ignores the ranges): the
 estimate's true value for the oracle's scan, and
 
-- with `draws` (an [`ErrorDraws`](@ref)): plus the network's error times
-  `gain`, with its σ times `gain` (at least `σ_min`): what a network `gain`
-  times as wrong would give;
+- with `draws` (an [`ErrorDraws`](@ref), or a [`ReplayDraws`](@ref) of
+  recorded errors, shared by the car's and the cloud's stand-ins, `role`
+  saying which this is): plus the network's error times `gain`, with its σ
+  times `gain` (at least `σ_min`): what a network `gain` times as wrong
+  would give;
 - without: σ = `σ_min` (a vector, per entry), a network that is right and
   sure of it;
 - `silent`: no result (σ = Inf, which the selector drops as unsure), as
@@ -41,14 +43,16 @@ mutable struct OracleNet{D}
     oracle::Oracle
     estimate::Symbol
     draws::D
+    role::Symbol
     gain::Float64
     σ_min::Vector{Float64}
     silent::Bool
     last_t::Float64
 end
 
-OracleNet(o::Oracle, est::Symbol; draws=nothing, gain::Real=1.0, σ_min::AbstractVector{<:Real}, silent::Bool=false) =
-    OracleNet(o, est, draws, Float64(gain), collect(Float64, σ_min), silent, -Inf)
+OracleNet(o::Oracle, est::Symbol; draws=nothing, role::Symbol=:car, gain::Real=1.0, σ_min::AbstractVector{<:Real},
+          silent::Bool=false) =
+    OracleNet(o, est, draws, role, Float64(gain), collect(Float64, σ_min), silent, -Inf)
 
 function LidarLaneNets.predict(n::OracleNet, ::AbstractVector{<:Real})
     o = n.oracle
@@ -58,6 +62,6 @@ function LidarLaneNets.predict(n::OracleNet, ::AbstractVector{<:Real})
     n.draws === nothing && return copy(truth), copy(n.σ_min)
     dt = o.t - n.last_t
     n.last_t = o.t
-    err, σ = draw!(n.draws, dt, situation(n.estimate, o.labels))
+    err, σ = oracle_errors!(n.draws, n.role, o.t, dt, n.estimate, o.labels)
     return truth .+ n.gain .* err, max.(n.gain .* σ, n.σ_min)
 end

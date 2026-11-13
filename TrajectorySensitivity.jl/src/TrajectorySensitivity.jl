@@ -25,6 +25,7 @@ using LinearAlgebra
 using Random
 using SpecialFunctions: erf, erfc, erfcinv
 using TOML
+import JLD2
 using LidarLaneNets
 using LidarRacer
 using StanleyController: Path, tracking_error
@@ -32,13 +33,17 @@ using StanleyController: Path, tracking_error
 export SCORES, from_score, to_score, GaussProcess, correlation, NetworkErrors, ErrorDraws, draw!, load_errors, typical_σ,
     situation, err_factor, σ_factor
 export Oracle, OracleNet, set_truth!
-export Perturbation, reference, accuracy, latency, describe, oracle_racer
+export Perturbation, reference, accuracy, latency, cloud_call, real_network, describe, oracle_racer
+export JointAccuracy, joint_accuracy, saltelli_design, mix, sobol_indices
+export SITUATIONS, situation_class, situation_features, ErrorLibrary, load_library, without, ReplayDraws
 export TrajectoryLog, log!, distance_driven, along, Comparison, compare, tube, by_segment
 export Piece, straight, bends, corner, spiral, TrackDesign, BuiltTrack, build_track, track_problems, track_map,
     write_track, read_segments
 
 include("errors.jl")
+include("replay.jl")
 include("oracle.jl")
+include("sobol.jl")
 include("experiments.jl")
 include("trajectory.jl")
 include("track.jl")

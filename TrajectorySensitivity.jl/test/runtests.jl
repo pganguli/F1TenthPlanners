@@ -102,7 +102,8 @@ straight_lane(; e=0.0, ψe=0.0) = lane_labels(; e, ψe, κ_profile=zeros(NP), w_
         @test occursin("latency", describe(latency(:e, 0.05)))
 
         # the controller each experiment runs, driving on a straight lane
-        for p in (reference(), accuracy(:e, 2.0), accuracy(:ψe, 1.0; network=:large), latency(:e, 0.05))
+        for p in (reference(), accuracy(:e, 2.0; source=:parametric), accuracy(:ψe, 1.0; network=:large, source=:parametric),
+                  latency(:e, 0.05))
             racer, oracle = oracle_racer(CAR, BEAMS, p, MODELS)
             @test racer isa Racer
             steer, speed = 0.0, 0.0
@@ -133,6 +134,102 @@ straight_lane(; e=0.0, ψe=0.0) = lane_labels(; e, ψe, κ_profile=zeros(NP), w_
         end
         @test lane.e ≈ 0.2 atol = 1e-3
         @test lane.status === :ok
+    end
+
+    @testset "situations and replay" begin
+        bend(κ_here, κ_ahead) = lane_labels(; e=0.0, ψe=0.0,
+            κ_profile=[s < 0.5 ? κ_here : κ_ahead for s in PROFILE_S], w_left=fill(1.0, NP), w_right=fill(1.0, NP),
+            sight=SIGHT_MAX, clearance=fill(CLEARANCE_MAX, NK))
+        @test SITUATIONS[situation_class(bend(0.0, 0.01))] == "straight"
+        @test SITUATIONS[situation_class(bend(0.0, 0.3))] == "medium entry"
+        @test SITUATIONS[situation_class(bend(0.1, 0.1))] == "gentle middle"
+        @test SITUATIONS[situation_class(bend(-0.8, 0.1))] == "tight exit"
+
+        # a library of 2 drives × 6 scans on 2 tracks: drive 1 bends left (κ 0.3), drive 2 is straight;
+        # e's car error = the scan's number, the cloud's its negative
+        lanes = [k <= 6 ? bend(0.3, 0.3) : bend(0.0, 0.0) for k in 1:12]
+        features = reduce(hcat, situation_features.(lanes))
+        follows = BitVector([1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0])
+        err = Dict((est, r) => zeros(Float32, output_size(est), 12) for est in ESTIMATES for r in (:car, :cloud))
+        σ = Dict((est, r) => fill(Float32(0.5), output_size(est), 12) for est in ESTIMATES for r in (:car, :cloud))
+        err[(:e, :car)][1, :] = 1:12
+        err[(:e, :cloud)][1, :] = -(1:12)
+        err[(:widths, :car)][1, :] .= 0.1    # the left side's
+        truth = Dict(est => Float32.(reduce(hcat, (l[est] for l in lanes))) for est in ESTIMATES)
+        lib = TrajectorySensitivity.ErrorLibrary((:small_weak, :large), ["A", "B"], [fill(1, 6); fill(2, 6)], follows,
+            features, truth, err, σ)
+        d = ReplayDraws(lib, :e, Xoshiro(1); block=3, near=2, keep=0.5)
+        straight = straight_lane()
+        # (a straight lane is its own mirror image: either way round)
+        seen = [abs(TrajectorySensitivity.oracle_errors!(d, :car, 0.025k, 0.025, :e, straight)[1][1]) for k in 1:30]
+        @test all(x -> 7 <= x <= 12, seen)                                # replayed from a straight lane
+        @test count(k -> seen[k+1] == seen[k] + 1, 1:29) >= 10            # in consecutive scans
+        e1, _ = TrajectorySensitivity.oracle_errors!(d, :car, 99.0, 0.025, :e, straight)
+        e2, s2 = TrajectorySensitivity.oracle_errors!(d, :cloud, 99.0, 0.025, :e, straight)
+        @test e2 == -e1 && s2 == [0.5]                                    # the car's and the cloud's: the same scan
+        # a right bend replays the left bend's errors, mirrored
+        dr = ReplayDraws(lib, :widths, Xoshiro(1); near=1)
+        w, _ = TrajectorySensitivity.oracle_errors!(dr, :car, 0.025, 0.025, :widths, bend(-0.3, -0.3))
+        @test w[NP+1] ≈ 0.1 && w[1] == 0 && dr.flip
+        de = ReplayDraws(lib, :e, Xoshiro(1); near=1)
+        @test TrajectorySensitivity.oracle_errors!(de, :car, 0.025, 0.025, :e, bend(-0.3, -0.3))[1][1] < 0
+        # carried over to the car's lane by the mean error: κ's error = -0.5 × the true κ, the recorded
+        # scans' true κ spread from 0.025 to 0.3
+        truth2 = deepcopy(truth)
+        truth2[:κ_profile] .= Float32.(0.025 .* (1:12)')
+        err[(:κ_profile, :car)] .= -0.5f0 .* truth2[:κ_profile]
+        lib2 = TrajectorySensitivity.ErrorLibrary((:small_weak, :large), ["A", "B"], [fill(1, 6); fill(2, 6)], follows,
+            features, truth2, err, σ; min_bin=1)
+        m = lib2.mean_err[(:κ_profile, :car)]
+        @test isapprox(m(1, 0.2), -0.1; atol=0.01) && isapprox(m(1, -0.2), 0.1; atol=0.01)
+        dk = ReplayDraws(lib2, :κ_profile, Xoshiro(1); near=1)
+        @test TrajectorySensitivity.oracle_errors!(dk, :car, 0.025, 0.025, :κ_profile, bend(0.3, 0.3))[1][1] ≈ -0.15 atol = 0.01
+        # leaving a track out
+        dw = ReplayDraws(without(lib, "B"), :e, Xoshiro(1); near=3)
+        @test all(k -> abs(TrajectorySensitivity.oracle_errors!(dw, :car, 0.025k, 0.025, :e, straight)[1][1]) <= 6, 1:10)
+        @test without(lib, "C") === lib
+
+        @test cloud_call(:sight, 0.05).kind === :cloud && real_network(:e; network=:large).network === :large
+        @test_throws ArgumentError accuracy(:e, 1.0; source=:other)
+        racer, oracle = oracle_racer(CAR, BEAMS, cloud_call(:e, 0.05), MODELS; library=lib)
+        @test racer.estimator.schedule isa FixedCalls && racer.estimator.cfg.remote_latency == 0.05
+        for k in 1:6
+            set_truth!(oracle, straight_lane(e=0.1), 0.025k)
+            control!(racer, zeros(length(BEAMS)), 3.0, 0.0, 0.025)
+        end
+        @test racer.estimator.calls[:e] == 6
+        @test_throws ArgumentError oracle_racer(CAR, BEAMS, cloud_call(:e, 0.05), MODELS)   # no library
+        @test_throws ArgumentError oracle_racer(CAR, BEAMS, real_network(:e), MODELS)         # no nets
+    end
+
+    @testset "sobol indices" begin
+        # Ishigami: known indices (Sobol' & Levitan 1999)
+        ish(x) = sin(x[1]) + 7sin(x[2])^2 + 0.1x[3]^4 * sin(x[1])
+        A, B = saltelli_design(Xoshiro(3), 20_000, 3)
+        A, B = π .* (2A .- 1), π .* (2B .- 1)
+        f(M) = [ish(r) for r in eachrow(M)]
+        S, ST, _ = sobol_indices(f(A), f(B), reduce(hcat, (f(mix(A, B, i)) for i in 1:3)))
+        @test isapprox(S, [0.314, 0.442, 0.0]; atol=0.03)
+        @test isapprox(ST, [0.558, 0.442, 0.244]; atol=0.03)
+        @test mix(A, B, 2)[:, 2] == B[:, 2] && mix(A, B, 2)[:, 1] == A[:, 1]
+
+        # a joint experiment: every estimate errs, from the same recorded scans
+        lanes = [straight_lane() for _ in 1:4]
+        lib = TrajectorySensitivity.ErrorLibrary((:small_weak, :large), ["A"], fill(1, 4), BitVector([1, 1, 1, 0]),
+            reduce(hcat, situation_features.(lanes)),
+            Dict(est => Float32.(reduce(hcat, (l[est] for l in lanes))) for est in ESTIMATES),
+            Dict((est, r) => fill(0.01f0, output_size(est), 4) for est in ESTIMATES for r in (:car, :cloud)),
+            Dict((est, r) => fill(0.05f0, output_size(est), 4) for est in ESTIMATES for r in (:car, :cloud)); min_bin=1)
+        p = joint_accuracy((0.0, 1.0, 2.0, 0.0, 0.0, 0.5); seed=2)
+        @test p.gains.ψe == 1.0 && p.gains.κ_profile == 2.0 && occursin("joint", describe(p))
+        racer, oracle = oracle_racer(CAR, BEAMS, p, MODELS; library=lib)
+        @test racer.estimator.schedule isa NoCalls
+        @test racer.estimator.nets.small.ψe.draws === racer.estimator.nets.small.κ_profile.draws    # one replay for all
+        set_truth!(oracle, straight_lane(), 0.025)
+        μ, _ = predict(racer.estimator.nets.small.κ_profile, zeros(length(BEAMS)))
+        @test all(x -> isapprox(x, 0.02; atol=1e-6), μ)              # 2 × the recorded 0.01
+        @test predict(racer.estimator.nets.small.e, zeros(length(BEAMS)))[1] == straight_lane().e   # gain 0: true
+        @test_throws ArgumentError oracle_racer(CAR, BEAMS, p, MODELS)
     end
 
     @testset "trajectories" begin
