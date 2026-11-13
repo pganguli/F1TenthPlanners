@@ -1,0 +1,57 @@
+# The simulation's sensitivities (the dnn-estimators branch's
+# TrajectorySensitivity.jl/scripts/results/sensitivity.md: the 22 racetracks
+# other than Shanghai and the representative track, 10 seeds, the car
+# network's errors replayed by situation, through the whole pipeline):
+# accuracy, the RMS lateral deviation from the reference run with the car
+# network's (small_weak) errors on the estimate (gain 1); latency, its
+# growth per 25 ms the estimate comes late from the cloud (least squares
+# over 0 to 100 ms). 95% intervals. (For the widths, the real network moves
+# the car far less than the replay: under 1 mm against 5 mm, calibration.md.)
+
+[e]
+accuracy = 0.0042
+accuracy_lo = 0.0041
+accuracy_hi = 0.0043
+latency = 0.0024
+latency_lo = 0.0022
+latency_hi = 0.0027
+
+["ψe"]
+accuracy = 0.012
+accuracy_lo = 0.011
+accuracy_hi = 0.012
+latency = 0.0032
+latency_lo = 0.0028
+latency_hi = 0.0036
+
+["κ_profile"]
+accuracy = 0.050
+accuracy_lo = 0.048
+accuracy_hi = 0.052
+latency = 0.0032
+latency_lo = 0.0029
+latency_hi = 0.0034
+
+[widths]
+accuracy = 0.0052
+accuracy_lo = 0.0042
+accuracy_hi = 0.0062
+latency = 0.0025
+latency_lo = 0.0023
+latency_hi = 0.0027
+
+[sight]
+accuracy = 0.0079
+accuracy_lo = 0.0073
+accuracy_hi = 0.0086
+latency = 0.0027
+latency_lo = 0.0024
+latency_hi = 0.0030
+
+[clearance]
+accuracy = 0.016
+accuracy_lo = 0.015
+accuracy_hi = 0.016
+latency = 0.0036
+latency_lo = 0.0033
+latency_hi = 0.0039

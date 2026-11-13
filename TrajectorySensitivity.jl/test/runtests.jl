@@ -196,6 +196,16 @@ straight_lane(; e=0.0, ψe=0.0) = lane_labels(; e, ψe, κ_profile=zeros(NP), w_
         # a delayed input: reaching the output only after a few steps
         A = [0.0 0.0 0.0; 1.0 0.0 0.0; 0.0 1.0 0.5]
         @test widths(disturbance_set(A, [1.0, 0.0, 0.0][:, :], [0.0 0.0 1.0], [1.0])) ≈ [4.0] rtol = 1e-6
+
+        # x' = a x + w: variance q / (1 − a²)
+        @test stationary_covariance(fill(0.9, 1, 1), fill(2.0, 1, 1))[1] ≈ 2 / (1 - 0.81)
+        A2 = [0.5 0.2; -0.1 0.7]
+        Q2 = [1.0 0.3; 0.3 2.0]
+        P2 = stationary_covariance(A2, Q2)
+        @test P2 ≈ A2 * P2 * A2' + Q2
+        # a random walk measured with noise: the scalar Riccati equation's fixed point
+        K, P = kalman_gain(fill(1.0, 1, 1), fill(1.0, 1, 1), fill(1.0, 1, 1), fill(1.0, 1, 1))
+        @test P[1] ≈ (1 + sqrt(5)) / 2 && K[1] ≈ P[1] / (P[1] + 1)
     end
 
     @testset "tracks" begin

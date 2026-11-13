@@ -111,6 +111,7 @@ From [scripts/](scripts/), set up once with
 | [`sensitivity.jl`](scripts/sensitivity.jl) | the reference, and both tests for every estimate (`julia -t auto --project=. sensitivity.jl`) | `results/sensitivity.md`, `runs.csv` (`runs.jld2`, `tubes.jld2`: every trajectory, not committed) |
 | [`plots.jl`](scripts/plots.jl) | plots them | `results/accuracy.png`, `latency.png`, `along_track.png` |
 | [`analytic.jl`](scripts/analytic.jl) | the same questions from the linearized closed loop, without simulation or map (see below) | `results/analytic.md` |
+| [`matched.jl`](scripts/matched.jl) | the simulation's own numbers from the linearized closed loop with the Kalman filter, without simulation or map (see below) | `results/matched.md` |
 | [`validate.jl`](scripts/validate.jl) | a check outside the analysis: the real networks (car alone, cloud alone) on the same track | `results/validate.md` |
 
 The results are in [scripts/results/sensitivity.md](scripts/results/sensitivity.md).
@@ -118,24 +119,87 @@ The results are in [scripts/results/sensitivity.md](scripts/results/sensitivity.
 ## Without simulation
 
 [`analytic.jl`](scripts/analytic.jl) asks the same questions without a
-simulator or a map. It linearizes the closed loop about one situation: the
-car in steady state on a lane of constant curvature, with the lane's center
-line, walls and what the LiDAR sees computed from the geometry. The pieces:
+simulator or a map. It linearizes the closed loop about a situation: the
+car in steady state on a lane of constant curvature and width, with the
+lane's center line, walls and what the LiDAR sees computed from the
+geometry. One situation in detail (0.1 1/m, 2.26 m), then a grid: curvature
+0 to 0.5 1/m, width 1.6, 2.26 and 3.2 m. The pieces:
 
 - the car (F1Tenth.jl's `vehicle_dynamics_st`), the servo and the VESC
   speed loop, sampled every scan with the command delay;
 - LidarRacer.jl's `drive`, by its exact Jacobian, fed the estimates
-  directly, with no Kalman filter and no age limit on late results.
+  directly, with no Kalman filter and no age limit on late results;
+- in tight bends (from 0.15 1/m), the speed held at the steady state's: the
+  speed loop is unstable in small signal there (through the free distance
+  ahead, which the speed changes through the yaw rate), and on the car the
+  command limiter's ramps hold it to a chatter of a few cm/s.
 
 It then computes the sets the loop can reach (`Zonotope`):
 
 - **accuracy**: the final set for a constant bias anywhere in a box (± the
-  car network's median error), as `bias_set` computes it;
+  car network's median error), as `bias_set` computes it; and the finite
+  one, by solving the nonlinear steady state at the box's extremes, which
+  sees what a bias of that size does where the controller steps (a profile
+  point appearing) or reaches a bound;
 - **latency**: the set of the difference a delay of n scans makes, over
   every road whose curvature varies within the racetracks' statistics, as
   `disturbance_set` computes it, plus the delay margin.
 
+What the grid shows: `κ_profile`'s bias moves the car the most everywhere
+(0.07 m on a straight, 0.15 to 1 m in bends); `sight`, `widths` and
+`clearance` have no effect for small biases, but a median-sized one moves
+the car in tight bends (up to 0.1 m for the widths on a wide lane), which
+only the finite steady state shows; `ψe`'s delay margin is 100 to 225 ms
+everywhere, the shortest of any estimate (125 ms on a straight, at 7 m/s);
+at 0.5 1/m the controller holds no steady state.
+
 Results: [scripts/results/analytic.md](scripts/results/analytic.md).
+
+### Matched to the simulation
+
+[`matched.jl`](scripts/matched.jl) answers the simulation's questions in its
+terms, still without a simulator or a map: the RMS deviation from the
+reference with the car network's errors on one estimate, and its growth per
+25 ms of delay. Against analytic.jl, it:
+
+- puts LidarLaneNets.jl's Kalman filter in the loop, as the car runs it: on
+  `e`, `ψe` and the curvature beside the car at its steady-state gain
+  (`kalman_gain`, the Riccati equation), its motion model's mismatch a
+  constant; late results counted at their scan and carried forward by the
+  motion model (or, for profiles, shifted, their far end lost);
+- replaces worst-case sets with statistics: random roads (each situation's
+  lane bending about its curvature as much as the racetracks' do ahead of the
+  car there) and the network's recorded errors (their mean, covariance,
+  scan-to-scan correlation and dependence on the true value, from the error
+  library, at each situation), and the loop's stationary covariance
+  (`stationary_covariance`, the Lyapunov equation), against a reference loop
+  on the same road;
+- takes the measured entries' errors through the planner exactly, not by its
+  derivative (statistical linearization: the mean, covariance and
+  correlation of the commands they cause, the controller's steps and its
+  k_σ σ offsets included);
+- adds bends ahead: within 10 m of the car (clearance's and sight's range),
+  a straight with a bend ahead or a bend with a straight ahead, the scene held
+  as it is about the car, besides lanes of constant curvature; and weights
+  every situation by how much of the 23 racetracks is like it;
+- in tight bends, where the speed loop is unstable in small signal, passes the
+  speed command through the command limiter's ramp's describing function (a
+  low-pass, the shortest that makes the loop just stable), so the speed still
+  follows its mean command, as on the car.
+
+Against the simulation ([matched.md](scripts/results/matched.md)), the
+analytic values come within a factor of about 2 for every estimate,
+accuracy and latency (within 30% for latency), and in the same order, as
+far as the simulation tells the estimates apart: by accuracy `κ_profile`,
+`clearance`, `ψe`, `sight`, then `e` and `widths` (which the simulation
+can't tell apart; its `widths` is its error replay's, harsher than the
+network, which moves the car under 1 mm, as here); by latency all six
+between 2.5 and 4.3 mm per 25 ms (the simulation's between 2.4 and 3.6,
+their intervals overlapping, as the analytic values are within a few percent
+where the two orders differ).
+
+It needs the error library (the simulation branch's scripts/error_library.jl
+writes it; `ERROR_LIBRARY=path`, by default `scripts/results/error_library.jld2`).
 
 ## Limits
 

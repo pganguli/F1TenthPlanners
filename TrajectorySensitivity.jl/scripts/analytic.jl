@@ -2,12 +2,13 @@
 # without simulation and without a map: the closed loop (F1Tenth.jl's
 # single-track car, servo and VESC speed loop; the LiDAR's timing;
 # LidarRacer.jl's planners and Stanley steering, with no Kalman filter and
-# no age limit on late results) linearized about one situation, and the
-# sets its states can reach (zonotopes). Writes results/analytic.md.
+# no age limit on late results) linearized about a situation, and the sets
+# its states can reach (zonotopes): one situation in detail, then a grid of
+# them. Writes results/analytic.md.
 #
 #     julia --project=. analytic.jl
 #
-# The situation: the car in steady state on a lane of constant curvature κ0
+# A situation: the car in steady state on a lane of constant curvature κ0
 # and width W, everything about it (its center line, its walls, what the
 # LiDAR can see) computed from the geometry, not from a map. Linearized
 # there:
@@ -18,7 +19,11 @@
 #   (25 ms) with the command taking effect 26.25 ms after its scan (the
 #   sweep and the computing latency). The command limiter's and VESC's
 #   ramps, the steering limits and the tires' grip limit are not in a
-#   linear model: it holds for small deviations;
+#   linear model: it holds for small deviations. In tight bends, where the
+#   speed loop is unstable in small signal (through the speed planner's limit
+#   active there: the free distance along the arc the car turns on, which the
+#   speed itself changes, or the yaw-rate cap) and the ramps hold it to a
+#   chatter, the speed is held (`frozen`);
 # - the controller: LidarRacer.jl's `drive` (path planner, Stanley, speed
 #   planner) by its exact Jacobian at the situation, fed the estimates
 #   directly (no Kalman filter) and the car's measured speed and yaw rate;
@@ -28,7 +33,8 @@
 # Accuracy: one estimate gets a constant bias, anywhere in the box ± the car
 # network's median error there (each entry on its own); its sensitivity is
 # the size of the final reachable set of the car's lateral offset (and
-# speed): every steady state those biases lead to.
+# speed): every steady state those biases lead to. Linear, and finite: the
+# nonlinear steady state solved at the box's extremes (`finite_bias`).
 #
 # Latency: one estimate is n scans late (no age limit), the others on time,
 # while the road's curvature varies (a first-order process, its bound and
@@ -51,17 +57,19 @@ using TrajectorySensitivity
 
 const OUT = joinpath(@__DIR__, "results")
 
-# --- the situation: a lane of constant curvature 0.1 1/m (radius 10 m;
+# --- the main situation: a lane of constant curvature 0.1 1/m (radius 10 m;
 # between the racetracks' 75th and 90th percentile |κ|, 0.07 and 0.19 1/m)
-# and their median width. The tightest such lane tried (0.02, 0.05, 0.1,
-# 0.15, 0.2 1/m) on which the linearized loop is stable: from 0.15 1/m the
-# speed is set by the yaw-rate cap (a_lat / |r|) and the speed loop through
-# it is unstable in small signal (in the simulator, the command limiter's
-# ramps hold it to a chatter of about ±2 cm/s). Another curvature:
-# KAPPA0=0.05 julia --project=. analytic.jl
-const KAPPA0 = parse(Float64, get(ENV, "KAPPA0", "0.1"))
+# and their median width: the tightest on which the whole loop, speed too,
+# is stable in small signal.
+const KAPPA0 = 0.1        # the main situation's
 const WIDTH = 2.26
 const T = 1 / 40          # scan period [s]
+
+# The grid of situations (scripts/results/analytic.md, "Across situations"):
+# the lane's curvature, from straight to the racetracks' tightest bends, and
+# its width (about their 10th, 50th and 90th percentile).
+const GRID_KAPPA = [0.0, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5]
+const GRID_WIDTH = [1.6, 2.26, 3.2]
 
 # where each estimate's entries are in a flat vector of all six
 const SIZES = (e=1, ψe=1, κ_profile=length(PROFILE_S), widths=2length(PROFILE_S), sight=1, clearance=length(CLEARANCE_K))
@@ -84,15 +92,16 @@ struct Lane
     walls::NTuple{2,Matrix{Float64}}   # left, right: 2 × n polylines
     κ::Function
     path::Path
+    width::Float64
 end
 
 """
-    Lane(κ; s_lo, s_hi, ds) -> Lane
+    Lane(κ, width; s_lo, s_hi, ds) -> Lane
 
-A lane of width WIDTH whose center line has curvature `κ(s)`, with `s = 0`
-at the origin heading along x.
+A lane of `width` whose center line has curvature `κ(s)`, with `s = 0` at
+the origin heading along x.
 """
-function Lane(κ; s_lo=-4.0, s_hi=18.0, ds=0.01)
+function Lane(κ, width::Real; s_lo=-4.0, s_hi=18.0, ds=0.01)
     s = collect(s_lo:ds:s_hi)
     i0 = round(Int, -s_lo / ds) + 1
     n = length(s)
@@ -107,10 +116,10 @@ function Lane(κ; s_lo=-4.0, s_hi=18.0, ds=0.01)
         x[i-1] = x[i] - ds * cos((h[i] + h[i-1]) / 2)
         y[i-1] = y[i] - ds * sin((h[i] + h[i-1]) / 2)
     end
-    w = WIDTH / 2
+    w = width / 2
     left = vcat((x .- w .* sin.(h))', (y .+ w .* cos.(h))')
     right = vcat((x .+ w .* sin.(h))', (y .- w .* cos.(h))')
-    return Lane(s, x, y, h, (left, right), κ, Path(x, y))
+    return Lane(s, x, y, h, (left, right), κ, Path(x, y), Float64(width))
 end
 
 _cross(ax, ay, bx, by) = ax * by - ay * bx
@@ -181,7 +190,7 @@ function true_estimates(L::Lane, d, ψ, p)
     err = tracking_error(L.path, fx, fy, θ)
     s0 = L.s[1] + err.s
     κp = [L.κ(s0 + q) for q in PROFILE_S]
-    wl, wr = fill(WIDTH / 2, length(PROFILE_S)), fill(WIDTH / 2, length(PROFILE_S))
+    wl, wr = fill(L.width / 2, length(PROFILE_S)), fill(L.width / 2, length(PROFILE_S))
     ok(q) = begin
         px, py = center_at(L, s0 + q)
         hypot(px - lx, py - ly) <= p.scan_range && visible(L, lx, ly, px, py)
@@ -222,9 +231,9 @@ end
 
 # The continuous dynamics: x = (d, ψ̃, v, r, β, δ, i, ξ), u = (steer, speed)
 # commands, w = the road's curvature at the car less κ0.
-function plant(x, u, w)
+function plant(x, u, w, κ0)
     d, ψ, v, r, β, δ, i, ξ = x
-    κ = KAPPA0 + w
+    κ = κ0 + w
     err = u[2] - v * cos(β)                                   # the VESC's speed error, in m/s
     out = VP.vesc_kp / 20 * VP.erpm_gain * err + i + VP.vesc_kd / 20 * VP.erpm_gain / TAU_F * (err - ξ)
     sv = (u[1] - δ) / VP.tau_steer                            # the servo
@@ -234,33 +243,69 @@ function plant(x, u, w)
 end
 
 """
-    equilibrium() -> NamedTuple
+    equilibrium(κ0, width; κfun=nothing, bias=nothing, start=nothing) -> NamedTuple or nothing
 
-The steady state on the nominal lane: the car's offset, slip, steering,
-drive, speed (Newton's method on the body's steady state, the controller's
-steering and speed commands), and the estimates' true values there.
+The steady state on a lane of constant curvature `κ0` and `width` (or, with
+`κfun`, a lane whose curvature at `s` meters ahead is `κfun(s)`, `κ0` at the
+car: a bend ahead, say, the scene held as it is about the car, as on a lane
+of constant curvature it is): the
+car's offset, slip, steering, drive, speed (Newton's method on the body's
+steady state, the controller's steering and speed commands), and the
+estimates' true values there. With `bias` (a flat vector over every
+estimate's entries), the steady state the controller reaches when the
+estimates it gets are off by it: solved from `start` (an unbiased steady
+state) with that state's Jacobian (a chord method, which doesn't need the
+controller's derivative where it steps). `nothing` when it doesn't settle
+(the bias leaves no steady state: the loop chatters or runs off).
 """
-function equilibrium()
-    L = Lane(_ -> KAPPA0)
+function equilibrium(κ0, width; κfun=nothing, bias=nothing, start=nothing)
+    κf = κfun === nothing ? (_ -> Float64(κ0)) : κfun
+    L = Lane(κf, width)
+    b = bias === nothing ? zeros(NLAB) : bias
     function residual(y)
-        d, β, δ, a, v = y
-        r = KAPPA0 * v / (1 - KAPPA0 * d)
+        local d, β, δ, a, v = y   # (local: not the outer function's, set below)
+        local r = κ0 * v / (1 - κ0 * d)
         f = F1Tenth.vehicle_dynamics_st(SVector(0.0, 0.0, δ, v, 0.0, r, β), SVector(0.0, a), VP)
-        u = controller(true_estimates(L, d, -β, GEOM), v, r)
+        local u = controller(true_estimates(L, d, -β, GEOM) .+ b, v, r)
         return [f[4], f[6], f[7], u[1] - δ, u[2] - v * cos(β)]
     end
-    y = [0.0, 0.0, atan(KAPPA0 * (VP.lf + VP.lr)), 0.1, sqrt(PLANNER.speed.a_lat / KAPPA0)]
-    for it in 1:40
-        R = residual(y)
-        norm(R) < 1e-11 && break
-        y = y .- TrajectorySensitivity.jacobian(residual, y; h=1e-7) \ R
-        it == 40 && @warn "equilibrium: residual $(norm(R))"
+    if start === nothing
+        v0 = κ0 > 0 ? sqrt(PLANNER.speed.a_lat / κ0) : PLANNER.speed.v_max
+        # a bend ahead: start at a speed for it
+        κs = maximum(abs(κf(s)) for s in 0.0:0.5:10.0)
+        κ0 == 0 && κs > 0 && (v0 = sqrt(PLANNER.speed.a_lat / κs))
+        y = [0.0, 0.0, atan(κ0 * (VP.lf + VP.lr)), 0.1, min(v0, PLANNER.speed.v_max)]
+        for it in 1:60
+            R = residual(y)
+            norm(R) < 1e-11 && break
+            step = try
+                TrajectorySensitivity.jacobian(residual, y; h=1e-7) \ R
+            catch e
+                e isa LinearAlgebra.SingularException || rethrow()
+                return nothing
+            end
+            y = y .- step
+            (it == 60 || !all(isfinite, y)) && return nothing
+        end
+    else
+        y = [start.d, start.β, start.δ, start.a, start.v]
+        J = start.J
+        settled = false
+        for _ in 1:200
+            R = residual(y)
+            norm(R) < 1e-9 && (settled = true; break)
+            y = y .- J \ R
+            all(isfinite, y) || break
+        end
+        settled && rank(start.J) < 5 && (settled = false)
+        settled || return nothing
     end
     d, β, δ, a, v = y
-    r = KAPPA0 * v / (1 - KAPPA0 * d)
+    r = κ0 * v / (1 - κ0 * d)
     lab = true_estimates(L, d, -β, GEOM)
     x = [d, -β, v, r, β, δ, a / KA, 0.0]
-    return (; x, u=[δ, v * cos(β)], lab, d, β, δ, a, v, r, vesc_out=a / KA)
+    J = TrajectorySensitivity.jacobian(residual, y; h=1e-7)
+    return (; x, u=[δ, v * cos(β)], lab, d, β, δ, a, v, r, vesc_out=a / KA, κ0=Float64(κ0), width=Float64(width), J, κfun=κf)
 end
 
 # =====================================================================
@@ -308,24 +353,24 @@ estimates' Jacobians (Hx: offset and heading; Hk: the road's curvature at
 the knots, Δ apart, `k0` the car's).
 """
 function linearize(eq)
-    x0, u0 = eq.x, eq.u
-    @assert norm(plant(x0, u0, 0.0)) < 1e-6 "not an equilibrium: $(plant(x0, u0, 0.0))"
-    A = TrajectorySensitivity.jacobian(x -> plant(x, u0, 0.0), x0; h=1e-7)
-    B = TrajectorySensitivity.jacobian(u -> plant(x0, u, 0.0), u0; h=1e-7)
-    Bw = TrajectorySensitivity.jacobian(w -> plant(x0, u0, w[1]), [0.0]; h=1e-7)
+    x0, u0, κ0 = eq.x, eq.u, eq.κ0
+    @assert norm(plant(x0, u0, 0.0, κ0)) < 1e-6 "not an equilibrium: $(plant(x0, u0, 0.0, κ0))"
+    A = TrajectorySensitivity.jacobian(x -> plant(x, u0, 0.0, κ0), x0; h=1e-7)
+    B = TrajectorySensitivity.jacobian(u -> plant(x0, u, 0.0, κ0), u0; h=1e-7)
+    Bw = TrajectorySensitivity.jacobian(w -> plant(x0, u0, w[1], κ0), [0.0]; h=1e-7)
     Φ, Γold, Γnew, Γw, steps = discretize(A, B, Bw, T, DELAY)
     steps == 1 || error("the analysis assumes a command delay of one to two scans, not $(steps)")
     J = TrajectorySensitivity.jacobian(z -> controller(z[1:NLAB], z[NLAB+1], z[NLAB+2]), vcat(eq.lab, eq.v, eq.r); h=1e-6)
     KL, Kv, Kr = J[:, 1:NLAB], J[:, NLAB+1], J[:, NLAB+2]
     # the estimates against the car's pose
-    L0 = Lane(_ -> KAPPA0)
+    L0 = Lane(eq.κfun, eq.width)
     Hx = TrajectorySensitivity.jacobian(q -> true_estimates(L0, q[1], q[2], GEOM), [eq.d, -eq.β]; h=1e-6)
     # ... and against the road: knots Δ apart (one scan's travel), from 3 m behind to 13 m ahead
     Δ = eq.v * T
     knots = collect(-round(Int, 3 / Δ):round(Int, 13 / Δ)) .* Δ
     hat(s, j) = max(0.0, 1 - abs(s - knots[j]) / Δ)
-    road(δ) = s -> KAPPA0 + sum(δ[j] * hat(s, j) for j in eachindex(knots) if abs(s - knots[j]) < Δ; init=0.0)
-    Hk = TrajectorySensitivity.jacobian(δ -> true_estimates(Lane(road(δ)), eq.d, -eq.β, GEOM), zeros(length(knots));
+    road(δ) = s -> eq.κfun(s) + sum(δ[j] * hat(s, j) for j in eachindex(knots) if abs(s - knots[j]) < Δ; init=0.0)
+    Hk = TrajectorySensitivity.jacobian(δ -> true_estimates(Lane(road(δ), eq.width), eq.d, -eq.β, GEOM), zeros(length(knots));
         h=1e-4)
     k0 = findfirst(s -> abs(s) < Δ / 2, knots)
     return (; A, B, Bw, Φ, Γold, Γnew, Γw, KL, Kv, Kr, Hx, Hk, Δ, knots, k0)
@@ -419,22 +464,85 @@ function delay_margin(M, channel; max_delay=400)
     return hi
 end
 
+"""
+    frozen(M) -> NamedTuple
+
+`M` with the speed command held (its Jacobians zero): the loop with the
+speed fixed at the steady state's. In tight bends (from about 0.15 1/m) the
+speed loop is unstable in small signal, through the speed planner's limit
+active there (the free distance along the arc the car turns on, which the
+speed changes through the yaw rate; or the yaw-rate cap), and on the car the
+command limiter's ramps hold it to a chatter of a few cm/s about the steady
+speed; the lateral loop is then analyzed at that speed.
+"""
+function frozen(M)
+    KL, Kv, Kr = copy(M.KL), copy(M.Kv), copy(M.Kr)
+    KL[2, :] .= 0.0
+    Kv[2] = 0.0
+    Kr[2] = 0.0
+    return merge(M, (; KL, Kv, Kr))
+end
+
+"""
+    finite_bias(eq, est, ε, gain) -> (lateral, speed, settled)
+
+The final reachable set by solving the nonlinear steady state, not its
+derivative: at the extremes of the bias box ± `ε` on `est` (each entry the
+way the linear model moves the lateral offset most, both ways; every entry
+the same way, both ways; for the widths also both sides opposite), the
+spread of the lateral offset and of the speed over them (and the unbiased
+steady state). `gain`: the linear lateral gain per entry. `settled`: how
+many of the extremes have a steady state at all (a bias crossing a step of
+the controller, such as a profile point appearing, can leave none: the loop
+chatters).
+"""
+function finite_bias(eq, est, ε, gain)
+    idx = RANGES[est]
+    probes = Vector{Vector{Float64}}()
+    dir = sign.(gain)
+    any(!iszero, dir) && (push!(probes, ε .* dir); push!(probes, -ε .* dir))
+    push!(probes, ε); push!(probes, -ε)
+    if est === :widths
+        n = length(PROFILE_S)
+        push!(probes, [ε[1:n]; -ε[n+1:end]]); push!(probes, [-ε[1:n]; ε[n+1:end]])
+    end
+    d, v, settled = [eq.d], [eq.v], 0
+    for b in probes
+        full = zeros(NLAB)
+        full[idx] = b
+        e = equilibrium(eq.κ0, eq.width; κfun=eq.κfun, bias=full, start=eq)
+        e === nothing && continue
+        settled += 1
+        push!(d, e.d); push!(v, e.v)
+    end
+    return maximum(d) - minimum(d), maximum(v) - minimum(v), (settled, length(probes))
+end
+
 # =====================================================================
 
 fmt(x; d=3) = x === nothing ? "none" : isfinite(x) ? string(round(x; sigdigits=d)) : "–"
 
-function main()
-    eq = equilibrium()
-    @printf("equilibrium: v %.3f m/s, d %.4f m, β %.4f rad, δ %.4f rad, r %.4f rad/s, VESC output %.3f\n",
-        eq.v, eq.d, eq.β, eq.δ, eq.r, eq.vesc_out)
-    M = linearize(eq)
-    A0, C0, _, _ = closed_loop(M)
-    stable(A0) || error("the nominal closed loop is unstable")
-    ρ0 = maximum(abs, eigvals(A0))
-    println("closed loop stable, spectral radius ", round(ρ0; digits=4))
+"""
+    analyze(κ0, width, models, road) -> NamedTuple or nothing
 
-    # accuracy: a bias up to the car network's median error at the situation
-    models = load_errors(joinpath(OUT, "error_model.toml"); network=:small_weak)
+Every sensitivity at one situation: its steady state, whether the loop is
+stable there (if not, with the speed frozen: `frozen`), per estimate the
+final set's width for a bias up to the car network's median error there
+(linear, and by the nonlinear steady state), and its latency sensitivity and
+delay margin.
+"""
+function analyze(κ0, width, models, (K, ℓ); delays=0:4)
+    eq = equilibrium(κ0, width)
+    eq === nothing && return nothing
+    M = linearize(eq)
+    A0, _, _, _ = closed_loop(M)
+    ρ0 = maximum(abs, eigvals(A0))
+    speed_frozen = !stable(A0)
+    if speed_frozen
+        M = frozen(M)
+        A0, _, _, _ = closed_loop(M)
+        stable(A0) || return (; eq, ρ0, speed_frozen, stable=false)
+    end
     labs = unflatten(eq.lab)
     acc = Dict{Symbol,Any}()
     for est in ESTIMATES
@@ -442,72 +550,116 @@ function main()
         ε = m.s .* err_factor.(Ref(m), situation(est, labs))
         A, C, Bb, _ = closed_loop(M; channel=est)
         Z = bias_set(A, Bb, C, ε)
-        acc[est] = (; ε, Z, w=widths(Z), per_unit=widths(bias_set(A, Bb, C, ones(length(ε)))))
-        @printf("accuracy %-10s lateral %.4g m, speed %.4g m/s\n", est, acc[est].w[1], acc[est].w[2])
+        gain = (C*((I-A)\Bb))[1, :]
+        fin = finite_bias(eq, est, ε, gain)
+        acc[est] = (; ε, Z, w=widths(Z), per_unit=widths(bias_set(A, Bb, C, ones(length(ε)))), fin)
     end
-
-    # latency: the road varies; one estimate late
-    K, ℓ = road_statistics()
     a_road = exp(-M.Δ / ℓ)
     c = (1 - a_road) * K
-    @printf("road: |κ| ≤ %.3f 1/m (95th percentile), correlation length %.2f m\n", K, ℓ)
     lat = Dict{Symbol,Any}()
-    delays = 0:4
     for est in ESTIMATES
         w = map(n -> widths(latency_set(M, est, n, a_road, c)), delays)
         lat_w, spd_w = first.(w), last.(w)
-        slope = sum((delays) .* (lat_w .- lat_w[1])) / sum(abs2, delays)
-        margin = delay_margin(M, est)
-        lat[est] = (; lat_w, spd_w, slope, margin)
-        @printf("latency  %-10s %s m;  %.4g m per scan;  margin %s scans\n", est,
-            join((@sprintf("%.4g", x) for x in lat_w), " / "), slope, fmt(margin))
+        # the growth per scan, over the delays the loop stays stable at
+        ok = isfinite.(lat_w)
+        ds = collect(delays)[ok]
+        slope = count(ok) >= 2 && ok[1] ? sum(ds .* (lat_w[ok] .- lat_w[1])) / sum(abs2, ds) : Inf
+        lat[est] = (; lat_w, spd_w, slope, margin=delay_margin(M, est))
     end
-
     A, C, _, Br = closed_loop(M; road=true, a_road)
     lat_base = widths(disturbance_set(A, Br, C, [c]))[1]
-    write_report(eq, M, ρ0, acc, lat, K, ℓ, delays, lat_base)
+    ρ = maximum(abs, eigvals(A0))
+    return (; eq, M, ρ0, ρ, speed_frozen, stable=true, acc, lat, lat_base, delays)
 end
 
-function write_report(eq, M, ρ0, acc, lat, K, ℓ, delays, lat_base)
-    rows_acc = join((@sprintf("| `%s` | %s | %s | %s |", est, fmt(acc[est].w[1]), fmt(acc[est].w[2]),
+function main()
+    models = load_errors(joinpath(OUT, "error_model.toml"); network=:small_weak)
+    road = road_statistics()
+    @printf("road: |κ| ≤ %.3f 1/m (95th percentile), correlation length %.2f m\n", road...)
+    main_sit = analyze(KAPPA0, WIDTH, models, road)
+    main_sit === nothing && error("no steady state at the main situation")
+    grid = Dict{Tuple{Float64,Float64},Any}()
+    for κ0 in GRID_KAPPA, W in GRID_WIDTH
+        r = (κ0, W) == (KAPPA0, WIDTH) ? main_sit : analyze(κ0, W, models, road)
+        grid[(κ0, W)] = r
+        if r === nothing
+            @printf("κ0 %.2f, width %.2f: no steady state\n", κ0, W)
+        elseif !r.stable
+            @printf("κ0 %.2f, width %.2f: unstable even with the speed frozen (ρ %.3f)\n", κ0, W, r.ρ0)
+        else
+            @printf("κ0 %.2f, width %.2f: v %.2f m/s, d %.3f m, %s; κ_profile %.3g m, ψe latency %.3g m/scan\n", κ0, W,
+                r.eq.v, r.eq.d, r.speed_frozen ? "speed frozen" : "stable", r.acc[:κ_profile].w[1], r.lat[:ψe].slope)
+        end
+        flush(stdout)
+    end
+    write_report(main_sit, road, grid)
+end
+
+function write_report(r, (K, ℓ), grid)
+    eq, acc, lat, delays = r.eq, r.acc, r.lat, r.delays
+    settled_note(f) = f[3][1] < f[3][2] ? " ($(f[3][2] - f[3][1]) of $(f[3][2]) extremes: no steady state)" : ""
+    rows_acc = join((@sprintf("| `%s` | %s | %s%s | %s | %s |", est, fmt(acc[est].w[1]), fmt(acc[est].fin[1]),
+        settled_note(acc[est].fin), fmt(acc[est].w[2]),
         length(acc[est].ε) == 1 ? @sprintf("± %s", fmt(acc[est].ε[1])) :
         @sprintf("± %s to %s per entry", fmt(minimum(acc[est].ε)), fmt(maximum(acc[est].ε)))) for est in ESTIMATES), "\n")
     rows_lat = join((@sprintf("| `%s` | %s | %s | %s |", est, fmt(lat[est].slope),
         join((fmt(x) for x in lat[est].lat_w), " / "),
         lat[est].margin === nothing ? "none up to 10 s" : @sprintf("%d scans (%s ms)", lat[est].margin, fmt(1000T * lat[est].margin)))
                      for est in ESTIMATES), "\n")
+    # across situations
+    sits = [(κ0, W) for κ0 in GRID_KAPPA, W in GRID_WIDTH] |> vec |> sort
+    head = "| κ0 [1/m] | width [m] | speed [m/s] | loop | $(join(("`$e`" for e in ESTIMATES), " | ")) |\n|---|---|---|---|$(repeat("---|", length(ESTIMATES)))"
+    function table(cell)
+        lines = String[head]
+        for (κ0, W) in sits
+            g = grid[(κ0, W)]
+            if g === nothing
+                push!(lines, "| $(κ0) | $(W) | – | no steady state |$(repeat(" |", length(ESTIMATES)))")
+            elseif !g.stable
+                push!(lines, "| $(κ0) | $(W) | $(fmt(g.eq.v)) | unstable |$(repeat(" |", length(ESTIMATES)))")
+            else
+                push!(lines, "| $(κ0) | $(W) | $(fmt(g.eq.v)) | $(g.speed_frozen ? "speed held" : "stable") | " *
+                    join((cell(g, est) for est in ESTIMATES), " | ") * " |")
+            end
+        end
+        join(lines, "\n")
+    end
+    acc_cell(g, est) = (a = g.acc[est]; fmt(a.w[1]) * (abs(a.fin[1] - a.w[1]) > 0.2 * max(a.w[1], 1e-4) ?
+        " (finite: $(fmt(a.fin[1])))" : "") * (a.fin[3][1] < a.fin[3][2] ? " ⚠" : ""))
+    lat_cell(g, est) = (l = g.lat[est]; isfinite(l.slope) ? fmt(l.slope) * (all(isfinite, l.lat_w) ? "" : " ⚠") :
+        "unstable at $(l.margin)")
+    margin_cell(g, est) = (m = g.lat[est].margin; m === nothing ? "–" : "$(round(Int, 1000T * m))")
     write(joinpath(OUT, "analytic.md"), """
         # Sensitivity from the linearized closed loop
 
-        No simulation and no map: the closed loop linearized about one situation, and the sets it can reach
+        No simulation and no map: the closed loop linearized about a situation, and the sets it can reach
         (zonotopes). From [`analytic.jl`](../analytic.jl), which says how each part is modeled. Unlike the
         simulation ([sensitivity.md](sensitivity.md)): no Kalman filter (the estimates go to the planners as
-        they are), and no age limit on late results.
+        they are), and no age limit on late results. First one situation in detail, then a grid of them.
 
         ## The situation
 
         The car in steady state on a lane of constant curvature $(KAPPA0) 1/m (radius $(fmt(1 / KAPPA0)) m; the
         racetracks' center lines bend more than this between 10% and 25% of the way) and width $(WIDTH) m (their
-        median), its center line, walls and what the LiDAR sees computed from the geometry. (On a tighter lane,
-        from 0.15 1/m, the speed planner's yaw-rate cap sets the speed, and the speed loop through it is unstable
-        in small signal: in the simulator the command limiter's ramps hold it to a chatter of about ±2 cm/s, so a
-        linear model doesn't hold there.) There, the controller holds it at $(fmt(eq.v; d=4)) m/s, $(fmt(eq.d; d=3)) m
-        to the left of the lane's center (toward the inside), steering $(fmt(eq.δ; d=3)) rad; the estimates' true
-        values: sight $(fmt(eq.lab[RANGES.sight][1]; d=3)) m, clearance $(fmt(minimum(eq.lab[RANGES.clearance]); d=3)) to
-        $(fmt(maximum(eq.lab[RANGES.clearance]); d=3)) m along the fan. Linearized there, sampled every scan (25 ms,
-        commands taking effect $(fmt(1000DELAY; d=4)) ms after their scan), the closed loop is stable (spectral
-        radius $(fmt(ρ0; d=4))).
+        median), its center line, walls and what the LiDAR sees computed from the geometry. There, the controller
+        holds it at $(fmt(eq.v; d=4)) m/s, $(fmt(eq.d; d=3)) m to the left of the lane's center (toward the inside),
+        steering $(fmt(eq.δ; d=3)) rad; the estimates' true values: sight $(fmt(eq.lab[RANGES.sight][1]; d=3)) m,
+        clearance $(fmt(minimum(eq.lab[RANGES.clearance]); d=3)) to $(fmt(maximum(eq.lab[RANGES.clearance]); d=3)) m
+        along the fan. Linearized there, sampled every scan (25 ms, commands taking effect $(fmt(1000DELAY; d=4)) ms
+        after their scan), the closed loop is stable (spectral radius $(fmt(r.ρ; d=4))).
 
         ## Accuracy
 
         Each estimate with a constant bias anywhere in the box ± the car network's (small_weak) median error
         in this situation, each entry on its own (from [error_model.toml](error_model.toml)); the others true.
         The sensitivity: the final reachable set, every steady state such biases lead to, by its width in the
-        car's lateral offset and in its speed. The loop is linear, so a bias k times as large gives a set k times
-        as wide.
+        car's lateral offset and in its speed. Linear: from the loop's derivative (a bias k times as large gives a
+        set k times as wide). Finite: the nonlinear steady state solved at the box's extremes (each entry the way
+        the linear model moves the car most, both ways; every entry the same way, both ways; for the widths also
+        the two sides opposite), which sees what a bias of this size does where the controller steps or saturates.
 
-        | Estimate | Lateral offset: width of the final set [m] | Speed: width [m/s] | Bias box |
-        |---|---|---|---|
+        | Estimate | Lateral offset: linear [m] | finite [m] | Speed: linear [m/s] | Bias box |
+        |---|---|---|---|---|
         $(rows_acc)
 
         ## Latency
@@ -519,28 +671,50 @@ function write_report(eq, M, ρ0, acc, lat, K, ℓ, delays, lat_base)
         (against the same loop with the estimate on time, on the same road), over all such roads, by its width, at
         delays of $(join(delays, ", ")) scans; the sensitivity: its growth per scan (least squares). The delay
         margin: the shortest delay at which the loop goes unstable. (Over the same roads, the lateral offset
-        itself, with every estimate on time, spans $(fmt(lat_base)) m: mostly the car settling to a different offset
+        itself, with every estimate on time, spans $(fmt(r.lat_base)) m: mostly the car settling to a different offset
         in a tighter or wider bend.)
 
         | Estimate | Sensitivity [m per scan of delay] | Width at $(join(delays, " / ")) scans [m] | Delay margin |
         |---|---|---|---|
         $(rows_lat)
 
-        ## Why some are zero
+        ## Across situations
 
-        At this situation, a small change in `sight` or the `widths` changes no command: the path planner
-        rebuilds the lane in $(PROFILE_STEP) m steps up to the sight (a small change crosses no step), the
-        sight's braking limit on the speed is not the active one, and the planned line doesn't touch the lane's
-        bounds. Their sensitivity is exactly zero here: they matter only through larger errors (crossing a step,
-        reaching a bound), which a linear model can't see. `clearance` acts on the speed only (it sets the speed
-        here, through the free distance ahead), and on the lateral offset only through the speed.
+        The same, on a lane of each curvature (from straight to the racetracks' tightest bends) and width (about
+        their 10th, 50th and 90th percentile). The speed is the controller's own there: the speed planner's
+        limit active there, mostly braking for the free distance ahead along the arc the car turns on (the
+        planned line cuts to the inside of the bend within its horizon), the yaw-rate cap in the tightest
+        wide bends. Loop: stable; or, in tight bends, "speed held": the speed loop is unstable in small signal
+        there (the speed changes the yaw rate, the arc and so the free distance; on the car the command limiter's
+        ramps hold it to a chatter of a few cm/s), so the lateral loop is analyzed with the speed held at the
+        steady state's.
+
+        ### Accuracy: lateral offset, width of the final set [m]
+
+        Linear; in brackets the finite (nonlinear) one where it differs by more than 20%; ⚠ where some of the
+        box's extremes leave no steady state (the loop chatters there).
+
+        $(table(acc_cell))
+
+        ### Latency: sensitivity [m per scan of delay]
+
+        Over the delays (0 to $(last(r.delays)) scans) the loop stays stable at; ⚠ where it goes unstable within
+        them, "unstable at n" where it does from n scans.
+
+        $(table(lat_cell))
+
+        ### Delay margin [ms] (– : none up to 10 s)
+
+        $(table(margin_cell))
 
         ## What a linear model leaves out
 
-        The command limiter's and the VESC's ramps, the steering limits and the tires' grip limit (it holds for
-        small deviations); the speed planner's switches between its limits (only the one active here counts);
-        sight and clearance at their caps (there, their derivatives are zero). Sight and clearance are where the
-        view and the arc truly end, not rounded to the samples truth.jl uses, so that they change smoothly.
+        The command limiter's and the VESC's ramps (except as the held speed in tight bends), the steering
+        limits and the tires' grip limit (it holds for small deviations); the speed planner's switches between
+        its limits (only the one active at the situation counts); sight and clearance at their caps (there, their
+        derivatives are zero). The finite column of the accuracy table sees the controller's steps for a bias of
+        the median error's size, but not the dynamics on the way there. Sight and clearance are where the view and
+        the arc truly end, not rounded to the samples truth.jl uses, so that they change smoothly.
         """)
 end
 

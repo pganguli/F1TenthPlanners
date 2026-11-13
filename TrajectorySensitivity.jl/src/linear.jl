@@ -133,3 +133,45 @@ function disturbance_set(A, Bw, C, ε; tol::Real=1e-9, max_steps::Integer=100_00
     end
     return Zonotope(zeros(size(C, 1)), reduce(hcat, G))
 end
+
+"""
+    stationary_covariance(A, Q; tol=1e-12, max_doublings=60) -> Matrix
+
+The covariance `P` that `x[k+1] = A x[k] + w[k]` (`A` stable, `w` white
+with covariance `Q`) settles to: the solution of the discrete Lyapunov
+equation `P = A P A' + Q`, summed by doubling (`P ← P + Aⁿ P Aⁿ'`,
+`Aⁿ ← (Aⁿ)²`).
+"""
+function stationary_covariance(A::AbstractMatrix, Q::AbstractMatrix; tol::Real=1e-12, max_doublings::Integer=60)
+    P, An = Matrix{Float64}(Q), Matrix{Float64}(A)
+    for _ in 1:max_doublings
+        P = P + An * P * An'
+        An = An * An
+        maximum(abs, An) < tol && break
+    end
+    return (P + P') / 2
+end
+
+"""
+    kalman_gain(F, H, Q, R; tol=1e-14, max_iter=100_000) -> (K, P)
+
+The steady-state gain of the Kalman filter for `x[k+1] = F x[k] + w`
+(covariance `Q`), `z[k] = H x[k] + v` (covariance `R`), in the form the
+update uses it: `x̂ = x̂⁻ + K (z − H x̂⁻)`; and the predicted covariance `P`
+(the discrete Riccati equation, iterated to its fixed point).
+"""
+function kalman_gain(F, H, Q, R; tol::Real=1e-14, max_iter::Integer=100_000)
+    P = Matrix{Float64}(Q)
+    K = zeros(size(F, 1), size(H, 1))
+    for _ in 1:max_iter
+        S = H * P * H' + R
+        K = P * H' / S
+        Pn = F * (P - K * H * P) * F' + Q
+        Pn = (Pn + Pn') / 2
+        done = maximum(abs, Pn - P) <= tol * max(1.0, maximum(abs, P))
+        P = Pn
+        done && break
+    end
+    S = H * P * H' + R
+    return P * H' / S, P
+end

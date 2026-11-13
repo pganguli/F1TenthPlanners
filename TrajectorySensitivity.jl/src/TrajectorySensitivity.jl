@@ -40,6 +40,7 @@ export TrajectoryLog, log!, distance_driven, along, Comparison, compare, tube, b
 export Piece, straight, bends, corner, spiral, TrackDesign, BuiltTrack, build_track, track_problems, track_map,
     write_track, read_segments
 export Zonotope, box, linear_map, minkowski_sum, interval_hull, widths, jacobian, discretize, stable, bias_set,
+    stationary_covariance, kalman_gain,
     disturbance_set
 
 include("errors.jl")
