@@ -99,6 +99,18 @@ planner(; kwargs...) = Planner(CarParams(CAR); sweep=0.75 / CAR.scan_rate, kwarg
         @test v_wall <= sqrt(cfg.v_min^2 + 2cfg.a_brake * d) + 1e-9
         @test v_wall < v_straight
 
+        # past the last known curvature, the sharpest curve: the speed
+        # is set as if it were there, however far the lane is seen
+        cfg = p.speed
+        straight = fill(0.0, NP)
+        short = copy(straight); short[PROFILE_S .> 5.0] .= NaN
+        v_all = speed_command(cfg, straight, SIGHT_MAX, Inf, 7.0, 0.0)
+        v_short = speed_command(cfg, short, SIGHT_MAX, Inf, 7.0, 0.0)
+        v_corner = sqrt(cfg.a_lat * cfg.r_min)
+        @test v_short ≈ sqrt(v_corner^2 + 2cfg.a_brake * (5.0 - cfg.delay * 7.0))
+        @test v_all ≈ sqrt(v_corner^2 + 2cfg.a_brake * (PROFILE_LENGTH - cfg.delay * 7.0))
+        @test speed_command(cfg, straight, 6.0, Inf, 7.0, 0.0) < v_all   # and sight still limits it
+
         # sight is taken k_σ standard deviations short
         unsure = lane(sight=6.0)
         unsure = LaneState(unsure.e, unsure.ψe, unsure.κ, unsure.κ_profile, unsure.w_left, unsure.w_right, 6.0, 2.0,

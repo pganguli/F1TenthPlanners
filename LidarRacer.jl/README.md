@@ -109,7 +109,12 @@ There is no cruise speed. The speed is the fastest from which the car,
 braking at the command limiter's 2.5 m/s² after a two-scan delay, reaches
 every point of the line it sees no faster than that point's curve allows
 (lateral acceleration `a_lat`), and also a curve as sharp as the car can
-turn just past the end of what it sees. It is also capped so that speed ×
+turn just past the end of that line: the last point whose curvature it
+knows. The LiDAR sees the lane up to 10 m ahead, but the curvature profile
+reaches 8 m, so the 2 m between are taken as possibly the sharpest curve.
+(Placing that curve at the end of the sight instead let the car reach
+Shanghai's 0.6 m hairpin 1.5 m/s too fast; this costs about 4% of lap
+time.) It is also capped so that speed ×
 yaw rate stays within `a_lat`, and so that it can slow down short of a wall
 ahead. That wall is looked for along the arc the car is turning on and along
 the line it follows, whichever is clear for longer, not straight ahead: in a
@@ -136,33 +141,33 @@ Crashes in 40 runs:
 | Estimates from | Cloud calls per scan | 25 ms cloud latency | 50 ms | 100 ms |
 |---|---|---|---|---|
 | the car's networks only | 0 | 8 | 8 | 8 |
-| the cloud's only | 6 | **0** | **0** | 5 |
+| the cloud's only | 6 | **0** | **0** | 4 |
 | the car's, and the cloud's for every estimate | 6 | **0** | **0** | 8 |
-| the car's, and the cloud's in turn (round robin) | 1 | 4 | 8 | 8 |
+| the car's, and the cloud's in turn (round robin) | 1 | 3 | 7 | 8 |
 | the car's, and the cloud's far ahead (κ_profile, widths, sight) | 3 | **0** | **0** | 8 |
 
 How close the car came to the walls, at 50 ms (a public cloud over 5G):
 
 | Estimates from | Closest to a wall, worst run | Closest to a wall, mean | Time within 0.2 m of a wall | Scans with time to collision under 0.5 s | Heading error (RMS) |
 |---|---|---|---|---|---|
-| the car's networks only | 0.07 m | 0.27 m | 0.24% | 0.95% | 1.98° |
-| the cloud's only | 0.10 m | 0.32 m | 0.16% | 0.14% | 1.96° |
-| the car's, and the cloud's for every estimate | **0.21 m** | 0.36 m | **0%** | **0.01%** | **1.26°** |
-| the car's, and the cloud's far ahead | **0.16 m** | 0.36 m | **0.01%** | **0.02%** | **1.26°** |
+| the car's networks only | 0.07 m | 0.27 m | 0.24% | 0.95% | 1.93° |
+| the cloud's only | 0.10 m | 0.33 m | 0.16% | 0.15% | 1.93° |
+| the car's, and the cloud's for every estimate | **0.19 m** | 0.36 m | **0.02%** | **0%** | **1.23°** |
+| the car's, and the cloud's far ahead | **0.19 m** | 0.36 m | **0.01%** | **0.01%** | **1.25°** |
 
 - **Combining is safer than either tier alone at 25 and 50 ms.** With the
   cloud far ahead or for every estimate, no run crashed, and the car was
   within 0.2 m of a wall, or under 0.5 s from a collision, at most 0.02% of
   the time (the car alone: 0.24% and 0.95%). The worst run's closest
-  approach is 1.6–2 times the cloud alone's (0.16–0.21 m against 0.10 m at
+  approach is 1.9–2.7 times the cloud alone's (0.19–0.27 m against 0.10 m at
   25 and 50 ms). The heading is tracked about a third more accurately than
   by either tier alone.
 - **Far ahead does it with half the cloud calls**, and it plans on too much
-  free distance less often than the car alone (4.9% of scans against 6.0%
-  at 50 ms), as the cloud alone does (5.3%).
+  free distance less often than the car alone (4.8% of scans against 5.8%
+  at 50 ms), as the cloud alone does (5.1%).
 - **It gets worse as the cloud's latency grows.** At 100 ms every
   combination crashes on YasMarina like the car alone, and the cloud alone
-  crashes on Monza: 5 of 8 runs here, but between 2 and 6 in reruns that
+  crashes on Monza: 4 of 8 runs here, but between 2 and 6 in reruns that
   differ only in the last bits of floating point (with 4 scans of delay,
   Monza at 100 ms is on the edge, and the tiny differences grow over a
   lap). The other crash counts moved by at most one run between such
@@ -176,17 +181,17 @@ How close the car came to the walls, at 50 ms (a public cloud over 5G):
 
 The combinations that call the cloud's clearance (for every estimate, and
 round robin) plan on too much free distance in more scans than the car
-alone: 6.4–8.1% against 6.0%.
+alone: 6.1–7.8% against 5.8%.
 
-Lap times differ little (75–80 s on average over the laps finished; the
-true estimates give 74.0 s). The configurations finish different sets of
+Lap times differ little (78–81 s on average over the laps finished; the
+true estimates give 77.5 s). The configurations finish different sets of
 laps (the car alone never finishes YasMarina), so compare them with the
 paired column of the full tables.
 
 For reference, the hand-written estimator on `main` laps these tracks in
 74.6 s on average (one seed), with its own planner, which plans out to 10 m
-from the scan's points (here the profiles reach 8 m), so the comparison is
-approximate.
+from the scan's points (here the profiles reach 8 m, and the speed assumes
+the sharpest curve just past them), so the comparison is approximate.
 
 The planner, Stanley and speed settings were tuned with the hand-written
 estimator on `main` (on 12 racetracks, checked on the other 11) and are

@@ -112,9 +112,10 @@ VelocityProfilePlanner.jl) along the path ahead: the fastest speed from which
 the car, braking at `a_brake` after driving on for `delay`, reaches every
 point no faster than its curve allows (lateral acceleration at most `a_lat`),
 can slow to `v_min` `margin` short of a wall `free` meters ahead, and can
-still take, just past the end of the path (`sight` meters ahead), a curve as
-sharp as it can turn. `κ_profile[j]` is the path's curvature `(j - 1) *
-PROFILE_STEP` meters ahead (NaN where unknown). Also capped so that the
+still take, just past the end of the path (its last point of known
+curvature, at most `sight` meters ahead), a curve as sharp as it can turn.
+`κ_profile[j]` is the path's curvature `(j - 1) * PROFILE_STEP` meters ahead
+(NaN where unknown). Also capped so that the
 lateral acceleration in the turn the car is making now (speed × yaw rate)
 is at most `a_lat`.
 """
@@ -123,12 +124,16 @@ function speed_command(cfg::SpeedConfig, κ_profile::AbstractVector{<:Real}, sig
     from_braking(d) = max(d - coast, 0.0)
     # points (distance from where braking can start, curvature, speed cap)
     pts = Tuple{Float64,Float64,Float64}[]
+    known = 0.0   # how far ahead the path's curvature is known
     for (j, κ) in enumerate(κ_profile)
         d = (j - 1) * PROFILE_STEP
         d > sight && break
-        isnan(κ) || push!(pts, (from_braking(d), κ, Inf))
+        isnan(κ) || (push!(pts, (from_braking(d), κ, Inf)); known = d)
     end
-    push!(pts, (from_braking(sight), 0.0, cornering_speed(1 / cfg.r_min; a_lat=cfg.a_lat)))
+    # the sharpest curve, just past the last point whose curvature is known:
+    # the LiDAR may see the lane farther ahead (SIGHT_MAX) than the profile
+    # reaches (PROFILE_LENGTH), but not how it bends there
+    push!(pts, (from_braking(known), 0.0, cornering_speed(1 / cfg.r_min; a_lat=cfg.a_lat)))
     wall = free - cfg.margin
     isfinite(wall) && push!(pts, (from_braking(wall), 0.0, cfg.v_min))
     sort!(pts; by=first)
