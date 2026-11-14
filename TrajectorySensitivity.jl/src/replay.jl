@@ -202,15 +202,21 @@ function load_library(path::AbstractString)
 end
 
 """
-    ReplayDraws(library, estimate, rng; block=40, near=8, keep=1.0)
+    ReplayDraws(library, estimate, rng; block=40, near=8, keep=1.0, slack=SLACK)
 
 Replays a library's recorded errors for `estimate`, by situation: each scan
 gets the errors of a recorded scan whose true lane
 ([`situation_features`](@ref), each scaled by its spread) is like the car's,
 mirrored when the recorded lane bends the other way. It goes on through the
 recorded drive, scan after scan, while the recorded lane stays within
-`keep` of the car's (and for at most `block` scans, 1 s at 40 Hz); then it
-starts again at one of the `near` recorded scans nearest the car's lane.
+`keep` of the car's, or no farther from it than `slack` times the farthest
+of the `near` scans a fresh draw would pick from (and
+for at most `block` scans, 1 s at 40 Hz); then it starts again at one of
+the `near` recorded scans nearest the car's lane. (Without the second test,
+the replay would start afresh on every scan of a tight bend, where no
+recorded lane is within `keep`, and a network's errors that last through a
+bend would come back as independent ones that the Kalman filter averages
+away.)
 The car's and the cloud's errors for a scan come from the same recorded
 scan.
 
@@ -221,6 +227,8 @@ between the two values. A network that misses a wide-open side's width, or
 pulls a tight bend's curvature toward a gentler one, does so by the car's
 own lane.
 """
+const SLACK = 1.5
+
 mutable struct ReplayDraws{R<:AbstractRNG}
     lib::ErrorLibrary
     estimate::Symbol
@@ -228,14 +236,16 @@ mutable struct ReplayDraws{R<:AbstractRNG}
     block::Int
     near::Int
     keep::Float64
+    slack::Float64
     idx::Int
     flip::Bool
     left::Int
     t::Float64
 end
 
-ReplayDraws(lib::ErrorLibrary, est::Symbol, rng::AbstractRNG; block::Integer=40, near::Integer=8, keep::Real=1.0) =
-    ReplayDraws(lib, est, rng, block, near, Float64(keep), 0, false, 0, NaN)
+ReplayDraws(lib::ErrorLibrary, est::Symbol, rng::AbstractRNG; block::Integer=40, near::Integer=8, keep::Real=1.0,
+            slack::Real=SLACK) =
+    ReplayDraws(lib, est, rng, block, near, Float64(keep), Float64(slack), 0, false, 0, NaN)
 
 _dist2(F, j, f) = sum(abs2(F[i, j] - f[i]) for i in eachindex(f))
 
@@ -243,7 +253,9 @@ function _advance!(d::ReplayDraws, f::AbstractVector)
     lib = d.lib
     F(flip) = flip ? lib.mirrored : lib.features
     j = d.idx + 1
-    if d.idx > 0 && d.left > 0 && lib.follows[d.idx] && lib.usable[j] && _dist2(F(d.flip), j, f) <= d.keep^2
+    goes_on = d.idx > 0 && d.left > 0 && lib.follows[d.idx] && lib.usable[j]
+    δ_next = goes_on ? _dist2(F(d.flip), j, f) : Inf
+    if δ_next <= d.keep^2
         d.idx, d.left = j, d.left - 1
         return d
     end
@@ -259,6 +271,12 @@ function _advance!(d::ReplayDraws, f::AbstractVector)
     end
     filter!(b -> b[2] > 0, best)
     isempty(best) && throw(ArgumentError("the error library has no usable scans"))
+    # where no recorded lane is within `keep` (a tight bend, say), the drive
+    # goes on while it is about as like the car's lane as a fresh draw would be
+    if δ_next <= d.slack^2 * best[end][1]
+        d.idx, d.left = j, d.left - 1
+        return d
+    end
     _, d.idx, d.flip = rand(d.rng, best)
     d.left = d.block - 1
     return d

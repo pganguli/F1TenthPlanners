@@ -20,7 +20,9 @@ One experiment. `kind` is
   the car at every scan (no oracle for it), `seed` the LiDAR noise's.
 
 Errors come from `source`: `:replay` (the networks' recorded errors,
-[`ReplayDraws`](@ref)) or `:parametric` (the model, [`ErrorDraws`](@ref)).
+[`ReplayDraws`](@ref), never the course's own track's), `:replay_own` (the
+same, the course's own track's too: for checking the replay itself, not for
+the analysis) or `:parametric` (the model, [`ErrorDraws`](@ref)).
 The other estimates are true and come from the car at every scan.
 """
 struct Perturbation
@@ -74,7 +76,7 @@ real_network(est::Symbol; network::Symbol=:small_weak, seed::Integer=1) =
     Perturbation(:network, _check_est(est), 1.0, network, 0.0, seed, :network)
 
 _check_est(est) = est in ESTIMATES ? est : throw(ArgumentError("unknown estimate $est"))
-_check_source(s) = s in (:replay, :parametric) ? s : throw(ArgumentError("unknown error source $s"))
+_check_source(s) = s in (:replay, :replay_own, :parametric) ? s : throw(ArgumentError("unknown error source $s"))
 
 """
     describe(p::Perturbation) -> String
@@ -91,15 +93,16 @@ end
 
 """
     oracle_racer(car, beams, p::Perturbation, models; library=nothing, nets=nothing, car_set=:small_weak,
-                 cloud_set=:large, sure=0.01, selector=SelectorConfig(), tracking=TrackerConfig(), racer...)
-        -> (racer, oracle)
+                 cloud_set=:large, sure=0.01, selector=SelectorConfig(), tracking=TrackerConfig(), replay=(;),
+                 racer...) -> (racer, oracle)
 
 The controller (a LidarRacer `Racer`, everything as on the car) for the
 experiment `p`, its networks replaced by [`OracleNet`](@ref)s of one
 [`Oracle`](@ref). `models` holds the error models of each network set
 (`models[set]`, as from [`load_errors`](@ref)): `car_set` the car's,
 `cloud_set` the cloud's, and `p.network`; `library` the recorded errors
-(an [`ErrorLibrary`](@ref), for `:replay` and `:cloud`); `nets` the real
+(an [`ErrorLibrary`](@ref), for `:replay` and `:cloud`), replayed with
+[`ReplayDraws`](@ref)'s options `replay`; `nets` the real
 networks (`nets[set]`, as from LidarLaneNets' `load_nets`, for `:network`).
 
 What each network tells the Kalman filter is what a network making those
@@ -113,14 +116,14 @@ filter's noise parameters, the cloud schedule, and the cloud's delay.
 """
 function oracle_racer(car, beams, p::Perturbation, models; library=nothing, nets=nothing, car_set::Symbol=:small_weak,
                       cloud_set::Symbol=:large, sure::Real=0.01, selector::SelectorConfig=SelectorConfig(),
-                      tracking::TrackerConfig=TrackerConfig(), racer...)
+                      tracking::TrackerConfig=TrackerConfig(), replay::NamedTuple=(;), racer...)
     oracle = Oracle()
     car_m, cloud_m = models[car_set], models[cloud_set]
     changed(est) = p.kind !== :none && est === p.estimate
     erring = p.kind in (:accuracy, :cloud, :network)   # the changed estimate has a network's errors
     # the changed estimate's errors: recorded (shared by the car's and the cloud's stand-ins) or modeled
     draws = !(p.kind in (:accuracy, :cloud)) ? nothing :
-            p.source === :replay ? ReplayDraws(_need(library, "library"), p.estimate, Xoshiro(p.seed)) :
+            p.source in (:replay, :replay_own) ? ReplayDraws(_need(library, "library"), p.estimate, Xoshiro(p.seed); replay...) :
             ErrorDraws(models[p.network][p.estimate], Xoshiro(p.seed))
     role(set) = set === cloud_set ? :cloud : :car
     small = NamedTuple{ESTIMATES}(Tuple(begin
@@ -182,11 +185,11 @@ describe(p::JointAccuracy) = "joint accuracy " * join(("$e ×$(round(g; digits=3
 
 function oracle_racer(car, beams, p::JointAccuracy, models; library=nothing, car_set::Symbol=:small_weak,
                       cloud_set::Symbol=:large, sure::Real=0.01, selector::SelectorConfig=SelectorConfig(),
-                      tracking::TrackerConfig=TrackerConfig(), nets=nothing, racer...)
+                      tracking::TrackerConfig=TrackerConfig(), replay::NamedTuple=(;), nets=nothing, racer...)
     oracle = Oracle()
     m, cloud_m = models[p.network], models[cloud_set]
     # one replay for all six: their errors come from the same recorded scans
-    draws = ReplayDraws(_need(library, "library"), first(ESTIMATES), Xoshiro(p.seed))
+    draws = ReplayDraws(_need(library, "library"), first(ESTIMATES), Xoshiro(p.seed); replay...)
     role = p.network === cloud_set ? :cloud : :car
     small = NamedTuple{ESTIMATES}(Tuple(
         OracleNet(oracle, est; draws, role, gain=p.gains[est], σ_min=sure .* typical_σ(m[est])) for est in ESTIMATES))

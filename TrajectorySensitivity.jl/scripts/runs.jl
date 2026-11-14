@@ -96,19 +96,22 @@ a JointAccuracy), the oracle given
 the true estimates of each scan, until the laps are done, the car crashes or
 leaves the track, or 200 s a lap pass. `lidar_seed` seeds the LiDAR's noise
 (by default `p.seed` for a real network, which sees it, else 1); the
-oracle never replays errors recorded on the course's own track;
+oracle never replays errors recorded on the course's own track (but
+with source :replay_own);
 `on_scan(ranges, labels)` is called with each new scan and its true
-estimates.
+estimates; `replay` sets the replay's options (TrajectorySensitivity.ReplayDraws).
 """
 function simulate(p, c::Course, (models, library, nets); timestep=0.0025,
-                  lidar_seed=p isa Perturbation && p.kind === :network ? p.seed : 1, on_scan=nothing)
+                  lidar_seed=p isa Perturbation && p.kind === :network ? p.seed : 1, on_scan=nothing,
+                  replay=(;))
     seed = lidar_seed
     env = F110Env(; map=c.map, map_ext=c.ext, num_agents=1, timestep, integrator=Integrator.RK4, seed)
     params, agent = env.params, env.sim.agents[1]
     car = CarParams(params)
-    # never the course's own recorded errors
-    library = library === nothing ? nothing : without(library, c.name)
-    racer, oracle = oracle_racer(car, agent.lidar.scan_angles, p, models; library, nets)
+    # never the course's own recorded errors (but for :replay_own, which checks the replay)
+    own = p isa Perturbation && p.source === :replay_own
+    library = library === nothing || own ? library : without(library, c.name)
+    racer, oracle = oracle_racer(car, agent.lidar.scan_angles, p, models; library, nets, replay)
     tr = c.track
     x_ref, hw = car.lf - env.lidar_dist, car.width / 2
     (sx, sy), sθ = center_point(tr, 0.0), center_heading(tr, 0.0)

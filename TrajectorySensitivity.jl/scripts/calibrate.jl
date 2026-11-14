@@ -1,6 +1,8 @@
 # How the oracle compares with the real networks: for each estimate, the
 # real network on the car (the others true), against the oracle with that
-# network's recorded errors (replay) and with its modeled ones (parametric),
+# network's recorded errors (replay), with them including the run's own
+# track's (replay_own: whether the replay itself reproduces the network
+# where it has that track's errors), and with its modeled ones (parametric),
 # for the car's (small_weak) and the cloud's (large) networks, on the tracks
 # the networks never trained on (the validation and held-out tracks: the
 # error library's, each run replaying only the other tracks' errors) and the
@@ -21,6 +23,7 @@ function calibration_groups(seeds)
     for est in ESTIMATES, network in (:small_weak, :large)
         push!(g, [real_network(est; network, seed) for seed in seeds])
         push!(g, [accuracy(est, 1.0; network, source=:replay, seed) for seed in seeds])
+        push!(g, [accuracy(est, 1.0; network, source=:replay_own, seed) for seed in seeds])
         push!(g, [accuracy(est, 1.0; network, source=:parametric, seed) for seed in seeds])
     end
     return g

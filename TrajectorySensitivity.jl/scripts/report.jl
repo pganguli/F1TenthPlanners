@@ -116,7 +116,8 @@ in_class(rows, c) = filter(r -> r.class == c, rows)
 
 function calibration_report(rows)
     lines = String[]
-    sources = ("network" => "real network", "replay" => "oracle, recorded errors", "parametric" => "oracle, error model")
+    sources = ("network" => "real network", "replay" => "oracle, recorded errors",
+        "replay_own" => "oracle, recorded errors with the track's own", "parametric" => "oracle, error model")
     for net in ("small_weak", "large")
         push!(lines, """
 
@@ -137,7 +138,9 @@ function calibration_report(rows)
 
         Each estimate from the real network on the car (the others true), against the oracle with that
         network's recorded errors (replayed by the true lane, never from the run's own track: what
-        sensitivity.jl and cloud.jl use) and with its modeled errors (error_model.jl), on the tracks the
+        sensitivity.jl and cloud.jl use), with them including the run's own track's (a check of the replay
+        itself: whether it reproduces the network where it has that track's errors), and with its modeled
+        errors (error_model.jl), on the tracks the
         networks never trained on and the representative track ($(join(tracks, ", "))), 1 lap each (2 on the
         representative track), $(Int(maximum(r.seed for r in rows))) seeds (the real networks: the LiDAR's noise;
         the oracle: its draws). From [`calibrate.jl`](../calibrate.jl), summed up by [`report.jl`](../report.jl);

@@ -57,7 +57,13 @@ spread), mirrored when the recorded lane bends the other way (`e`, `ψe` and
 `κ_profile` change sign, the sides' widths swap, the clearance fan reverses).
 It goes on through that recorded drive, scan after scan, while the recorded
 lane stays like the car's (for at most 40 scans, 1 s), then starts again at
-one of the 8 nearest recorded scans. Everything else about the errors stays
+one of the 8 nearest recorded scans. In a tight bend no recorded lane is
+much like the car's (the library has a few hundred tight-bend scans), so
+"like" there means no more than 1.5 times as far from it as those 8: else
+the replay would start afresh on every scan, and a network's error that
+lasts through a bend would come back as independent errors the Kalman
+filter averages away.
+Everything else about the errors stays
 as it was: their distribution, how they persist from scan to scan, how they
 correlate across a profile's entries, how σ follows them, and how the car's
 and the cloud's errors on the same scan relate (a cloud call takes both
@@ -166,51 +172,59 @@ of the time within 0.2 m of a wall, the scans with time to collision under
 In [scripts/results/](scripts/results/): [sensitivity.md](scripts/results/sensitivity.md),
 [cloud.md](scripts/results/cloud.md), [interactions.md](scripts/results/interactions.md),
 [calibration.md](scripts/results/calibration.md).
-On 22 racetracks and the representative track (Shanghai is left out: the car crashes
-there even with every estimate true), 10 seeds:
+On 23 racetracks and the representative track, 10 seeds:
 
 | Estimate | Accuracy: RMS deviation with the car's network [m] | per unit of gain [m] | Latency: per 25 ms late [m] | Cloud call at 50 ms: change in least gap [m] |
 |---|---|---|---|---|
-| `κ_profile` | 0.050 (0.13 crashes/km) | 0.049 | 0.0032 | +0.081 (crashes 0.13/km → 0) |
-| `clearance` | 0.016 | 0.015 | 0.0036 | −0.004 (none) |
-| `ψe` | 0.012 | 0.011 | 0.0032 | 0.000 (none) |
-| `sight` | 0.0079 | 0.0086 | 0.0027 | −0.002 (none) |
-| `widths` | 0.0052 | 0.011 (grows faster than the gain) | 0.0025 | 0.000 (none) |
-| `e` | 0.0042 | 0.0038 | 0.0024 | −0.001 (none) |
+| `κ_profile` | 0.050 (0.095 crashes/km) | 0.050 | 0.0032 | +0.059 (crashes 0.095/km → 0) |
+| `ψe` | 0.013 | 0.011 | 0.0033 | −0.002 (none) |
+| `clearance` | 0.012 | 0.013 | 0.0018 | −0.001 (none) |
+| `widths` | 0.010 | 0.014 (grows faster than the gain) | 0.0022 | +0.001 (none) |
+| `sight` | 0.0069 | 0.0075 | 0.0028 | 0.000 (none) |
+| `e` | 0.0042 | 0.0038 | 0.0023 | 0.000 (none) |
 
-- **Accuracy matters most for `κ_profile`**, 3 to 12 times more than for the others,
+- **Accuracy matters most for `κ_profile`**, 4 to 13 times more than for the others,
   and it is the only estimate whose car network crashes the car (mostly in tight bends:
-  19 crashes/km in their middle). Its crashes grow fast with the error: 1.1/km at twice
-  the car network's errors, 5.5/km at four times.
-- **Latency costs about the same for every estimate, 2.4 to 3.6 mm per scan late**, up
+  25 crashes/km in their middle). Its crashes grow fast with the error: 1.0/km at twice
+  the car network's errors, 4.9/km at four times.
+- **Latency costs about the same for every estimate, 1.8 to 3.3 mm per scan late**, up
   to the selector's 100 ms. Past that the estimate never comes, and the car can't drive
   without `e` or `ψe`.
 - **Errors interact in crashes, not in the deviation**
   ([interactions.md](scripts/results/interactions.md): all six err at once, Sobol
   indices). The deviation is `κ_profile`'s alone (its first-order index about 1, the
-  others' totals under 0.1). But crashes come from combinations: `clearance`'s errors
-  alone never crash the car (not even 16 times the car network's), yet with `κ_profile`'s
-  they do: on the representative track, with `κ_profile` at 1 to 1.5 times the car
-  network's errors, 5% of runs crash when `clearance`'s are at most the car network's,
-  65% when they are larger (`clearance` sets the speed, through the free distance ahead).
-- **Calling the cloud pays only for `κ_profile`**: it takes the car from 0.13
-  crashes/km to none and 8 cm farther from the walls, at any delay up to 100 ms (most on
-  straights and at bend exits). For the other five it changes nothing measurable.
+  others' totals under 0.1). But crashes come from combinations (the first-order indices
+  sum to 0.24 over every track, the totals to 3.2). `clearance`'s errors alone never crash
+  the car (not even 16 times the car network's), yet with `κ_profile`'s they do: on the
+  representative track, with `κ_profile` at 1 to 1.5 times the car network's errors, 14%
+  of runs crash when `clearance`'s are at most the car network's, 43% when they are larger
+  (`clearance` sets the speed, through the free distance ahead; from `interactions.csv`).
+- **Calling the cloud pays only for `κ_profile`**: at 25 or 50 ms it takes the car from
+  0.095 crashes/km to none and 6 cm farther from the walls, 2 to 5 cm in every kind of
+  situation. At 100 ms it still crashes 0.031 times per km. For the other five it changes
+  nothing measurable.
 
 How far to trust them, from [calibration.md](scripts/results/calibration.md) (the oracle
 against the real networks in the loop, on the seven tracks they never trained on and the
 representative track): the replayed errors move the car as much as the real networks do
-within about 30% for `e`, `ψe`, `κ_profile`, `sight` and `clearance` (`e` and
-`κ_profile` some 20% less, `sight` 30% more). `widths`' replayed errors move it about
-5 mm, the real network's under 1 mm: both are negligible.
+within about 25% for `e`, `ψe`, `κ_profile`, `sight` and `clearance` (`κ_profile`
+some 20% less, `sight` 20% more). `widths`' replayed errors move it about 7 mm, the real
+network's under 1 mm: both are negligible.
 
 ## Limits
 
 - The real `κ_profile` network crashes the car in three particular tight bends (on
-  Monza, Yas Marina and the representative track), every seed. Replayed errors come from
-  other tracks' scenes (never the run's own), and they don't make those crashes: its
-  crash rates here are lower bounds (on the calibration tracks, the real network: 1.1/km;
-  the replay: 0.06).
+  Monza, Yas Marina and the representative track), nearly every seed: there it loses the
+  bend (its curvature falls to a fifth of the true one, or turns the wrong way, for up to
+  half a second). Its failures belong to particular corners: of the library's 204
+  tight-bend scans (|κ| ≥ 0.9 1/m beside the car), it loses the bend in 39% of Yas
+  Marina's and all of Monza's, against 0 to 12% on Hockenheim and Spa (Silverstone has 6),
+  and only Yas Marina's last 10 scans or more. A run never replays its own track's errors, so
+  the replay can't know which unseen corner the network fails at, and its `κ_profile`
+  crash rates are lower bounds (on the calibration tracks: the real network 1.1/km, the
+  replay 0). Given the track's own errors (`source=:replay_own`, calibration only), it
+  makes those crashes: 0.57/km (0.25–1.1). Closing the gap needs more tight bends the
+  networks never trained on in the library: more tracks.
 - The errors are replayed by the true lane only: the matching doesn't see the car's
   speed or anything else in the scan (other walls, openings).
 - They were recorded along the racer's own path on true estimates. Where an erring

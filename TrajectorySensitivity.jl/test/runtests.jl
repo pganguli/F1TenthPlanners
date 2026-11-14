@@ -184,6 +184,17 @@ straight_lane(; e=0.0, ψe=0.0) = lane_labels(; e, ψe, κ_profile=zeros(NP), w_
         @test isapprox(m(1, 0.2), -0.1; atol=0.01) && isapprox(m(1, -0.2), 0.1; atol=0.01)
         dk = ReplayDraws(lib2, :κ_profile, Xoshiro(1); near=1)
         @test TrajectorySensitivity.oracle_errors!(dk, :car, 0.025, 0.025, :κ_profile, bend(0.3, 0.3))[1][1] ≈ -0.15 atol = 0.01
+        # in a lane unlike every recorded one (none within `keep`), the drive goes on while it is as
+        # near as a fresh draw would be (`slack`); without that, a fresh draw every scan
+        far = bend(2.0, 2.0)
+        function replayed(slack)
+            d = ReplayDraws(lib, :e, Xoshiro(1); near=2, keep=0.5, slack)
+            return [TrajectorySensitivity.oracle_errors!(d, :car, 0.025k, 0.025, :e, far)[1][1] for k in 1:20]
+        end
+        on, off = replayed(1.0), replayed(0.0)
+        @test count(k -> on[k+1] == on[k] + 1, 1:19) >= 12
+        @test count(k -> off[k+1] == off[k] + 1, 1:19) <= 8
+        @test all(<=(2), off)                                             # the two nearest recorded scans
         # leaving a track out
         dw = ReplayDraws(without(lib, "B"), :e, Xoshiro(1); near=3)
         @test all(k -> abs(TrajectorySensitivity.oracle_errors!(dw, :car, 0.025k, 0.025, :e, straight)[1][1]) <= 6, 1:10)
@@ -191,6 +202,7 @@ straight_lane(; e=0.0, ψe=0.0) = lane_labels(; e, ψe, κ_profile=zeros(NP), w_
 
         @test cloud_call(:sight, 0.05).kind === :cloud && real_network(:e; network=:large).network === :large
         @test_throws ArgumentError accuracy(:e, 1.0; source=:other)
+        @test accuracy(:e, 1.0; source=:replay_own).source === :replay_own
         racer, oracle = oracle_racer(CAR, BEAMS, cloud_call(:e, 0.05), MODELS; library=lib)
         @test racer.estimator.schedule isa FixedCalls && racer.estimator.cfg.remote_latency == 0.05
         for k in 1:6
