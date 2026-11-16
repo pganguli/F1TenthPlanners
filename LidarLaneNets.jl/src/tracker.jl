@@ -71,18 +71,33 @@ default_noise() = (e=EstimateNoise(σ_bias=0.005), ψe=EstimateNoise(σ_bias=0.0
     clearance=EstimateNoise(σ_bias=0.15))
 
 """
-    load_noise(dir; small=:small_weak, large=:large) -> NamedTuple
+    load_noise(dir; small=:small_weak, large=:large, sources=(;)) -> NamedTuple
 
 The noise parameters measured for the network sets `small` (the car's) and
 `large` (the cloud's), from `dir/fusion.toml` (written by
-`train/fusion.jl`), as `(e=EstimateNoise(…), …)`.
+`train/fusion.jl`), as `(e=EstimateNoise(…), …)`. `sources` names another
+section of the car's for some estimates, such as `(widths=:geometric,)`
+for widths measured in the scan (see [`MixedEstimator`](@ref)).
 """
-function load_noise(dir::AbstractString; small::Symbol=:small_weak, large::Symbol=:large)
+function load_noise(dir::AbstractString; small::Symbol=:small_weak, large::Symbol=:large, sources=(;))
     d = TOML.parsefile(joinpath(dir, "fusion.toml"))
-    get1(est) = (s = d[String(small)][file_name(est)];
+    get1(est) = (s = d[String(get(sources, est, small))][file_name(est)];
         EstimateNoise(persist=s["persist"], τ=s["tau"], σ_bias=s["sigma_bias"], ν_small=s["nu"],
             ν_large=d[String(large)][file_name(est)]["nu"]))
     return NamedTuple{ESTIMATES}(Tuple(get1(est) for est in ESTIMATES))
+end
+
+"""
+    load_sigmas(dir, source) -> Dict{Symbol,Vector{Float64}}
+
+The fixed standard deviations, entry by entry, of a source of estimates
+that gives none of its own (`:hand`, `:geometric`): its RMS errors on the
+validation tracks, from `dir/fusion.toml`. For a [`MixedEstimator`](@ref).
+"""
+function load_sigmas(dir::AbstractString, source::Symbol)
+    d = TOML.parsefile(joinpath(dir, "fusion.toml"))[String(source)]
+    return Dict{Symbol,Vector{Float64}}(est => Float64.(d[file_name(est)]["sigma"])
+                                        for est in ESTIMATES if haskey(d, file_name(est)))
 end
 
 """
@@ -219,6 +234,46 @@ function _shift_values(v::Vector{Float64}, d, fillv)
     return out
 end
 
+# A profile's entries (values z, variances v) measured at different distances
+# driven (o), moved toward the car and aged by the distance driven since each
+# one's scan, in place. Where they overlap, the newer scan's entries win; a
+# gap of more than one step between known entries stays unknown.
+function _shift_aged!(z, v, o, odo, q)
+    n = length(z)
+    known = [i for i in 1:n if isfinite(z[i])]
+    kept = Tuple{Float64,Float64,Float64}[]   # (where it is now, value, variance)
+    covered = Tuple{Float64,Float64}[]
+    for g in sort!(unique(o[known]); rev=true)   # newest first
+        group = [i for i in known if o[i] == g]
+        d = odo - g
+        pos = [PROFILE_S[i] - d for i in group]
+        for (i, p) in zip(group, pos)
+            any(c -> c[1] - 1e-9 <= p <= c[2] + 1e-9, covered) && continue
+            push!(kept, (p, z[i], v[i] + (q * d)^2))
+        end
+        push!(covered, (minimum(pos), maximum(pos)))
+    end
+    sort!(kept; by=first)
+    fill!(z, NaN)
+    fill!(v, Inf)
+    for j in 1:n
+        s = PROFILE_S[j]
+        k = searchsortedlast(kept, (s + 1e-9,); by=first)
+        k == 0 && continue
+        a = kept[k]
+        if abs(a[1] - s) < 1e-9
+            z[j], v[j] = a[2], a[3]
+            continue
+        end
+        k == length(kept) && continue
+        b = kept[k+1]
+        b[1] - a[1] > PROFILE_STEP + 1e-6 && continue
+        f = (s - a[1]) / (b[1] - a[1])
+        z[j], v[j] = (1 - f) * a[2] + f * b[2], (1 - f) * a[3] + f * b[3]
+    end
+    return z, v
+end
+
 # The estimate now (distance driven `odo`), and its variance, of every entry.
 function _estimates(c::_Cells, odo, q; profile::Bool)
     n = length(c.b)
@@ -230,9 +285,16 @@ function _estimates(c::_Cells, odo, q; profile::Bool)
             outz[i] = z[i] - (bias ? c.b[i] : 0.0)
             outv[i] = R[i] + (bias ? c.Pbb[i] : 0.0)
         end
-        # aged by the distance driven since the scan (the oldest entry's, for a profile)
+        # aged by the distance driven since the scan
         if any(isfinite, outz)
-            d = odo - minimum(o[i] for i in 1:n if isfinite(z[i]))
+            ages = Set(o[i] for i in 1:n if isfinite(z[i]))
+            if profile && length(ages) > 1
+                # entries from different scans (a source that leaves some
+                # unknown, NaN, keeps older ones there): each by its own
+                _shift_aged!(outz, outv, o, odo, q)
+                continue
+            end
+            d = odo - minimum(ages)
             if profile && d > 0
                 known = _shift_values([isfinite(x) ? 1.0 : 0.0 for x in outz], d, 0.0)
                 outz .= _shift_values(replace(outz, NaN => 0.0), d, NaN)
@@ -426,7 +488,7 @@ function _start_lane!(s::_State, c::TrackerConfig, ms)
     lane_ms, from = Dict{Symbol,Any}(), Dict{Symbol,Tuple{Symbol,Symbol}}()
     for m in ms   # the cloud's, if both (it comes later in the order)
         k = _lane_k(m.estimate)
-        k == 0 && continue
+        (k == 0 || !isfinite(m.value[1])) && continue
         comp = _LANE[k]
         R, _, bias = _noise(c, m.estimate, m.tier, m.σ[1])
         lane_ms[comp] = (z=m.value[1], R, bias)
@@ -450,6 +512,7 @@ function _inflate_paired!(s::_State, c::TrackerConfig, step::_Step, used)
     for (est, k) in pairs(_LANE_K)
         sm, lg = _get(step, est, :small), _get(step, est, :large)
         (sm === nothing || lg === nothing) && continue
+        isfinite(sm.value[1]) && isfinite(lg.value[1]) || continue
         ((est, :small) in used || (est, :large) in used) && continue
         Rs, _, _ = _noise(c, est, :small, sm.σ[1])
         Rl, _, _ = _noise(c, est, :large, lg.σ[1])
@@ -470,7 +533,8 @@ function _update_all!(s::_State, c::TrackerConfig, ms, used, paired)
         est, k = m.estimate, _lane_k(m.estimate)
         for (j, val) in enumerate(m.value)
             R, ν, bias = _noise(c, est, m.tier, m.σ[j])
-            if j == 1 && k > 0 && s.lane.ready && !((est, m.tier) in used)
+            # (a source other than a network may leave an entry unknown: NaN)
+            if j == 1 && k > 0 && s.lane.ready && isfinite(val) && !((est, m.tier) in used)
                 q = _update!(s.lane, k, val, R, ν, bias, c.robust && !(est in paired))
                 k <= 2 && (nis[est] = max(get(nis, est, 0.0), q))
             end
@@ -494,6 +558,7 @@ function _update_cell_biases!(s::_State, c::TrackerConfig, step::_Step)
         small, large = _get(step, est, :small), _get(step, est, :large)
         (small === nothing || large === nothing) && continue
         for j in eachindex(small.value)
+            isfinite(small.value[j]) && isfinite(large.value[j]) || continue
             Rs, _, _ = _noise(c, est, :small, small.σ[j])
             cell, i = _cell(est, j)
             _bias_update!(s.cells[cell], i, small.value[j] - large.value[j], Rs + large.σ[j]^2)

@@ -55,6 +55,41 @@ validation tracks, counting that starting point: **a large network is never
 less accurate than its small one there** (so neither than `small_weak`,
 which is less accurate still).
 
+### Where they run
+
+The car's networks are sized for a microcontroller-class perception
+processor, the cloud's for a server:
+
+| | The car's (`small_weak`, all six) | The cloud's (`large`, all six) |
+|---|---|---|
+| MACs per scan | 0.107 M | 25.5 M |
+| Parameters (bytes at int8) | 37 k (37 KB) | 4.29 M (4.3 MB) |
+| On an STM32H7A3 microcontroller (Arm Cortex-M7, 280 MHz, 1.18 MB RAM, 2 MB flash), estimated | 0.6–0.7 ms | 145–176 ms, and twice its flash |
+| On one laptop core (Ryzen 5 7640U, float32), measured | 0.16 ms | 2.1 ms |
+
+- **The microcontroller's time** is the MACs over the throughput MLPerf
+  Tiny v1.1 measured on that board (ST's closed-division submission, int8,
+  X-CUBE-AI 8.1): 0.18 GMAC/s for keyword spotting (a depthwise-separable
+  CNN of 2.7 M MACs, the 5.4 M operations of Zhang et al., "Hello Edge",
+  2017, at 65.1 inferences/s) and 0.15 GMAC/s for anomaly detection (a
+  dense autoencoder of 0.26 M MACs at 550 inferences/s). The networks here
+  are convolutions and dense layers like those, but run in float32: their
+  accuracy at int8 is not checked.
+- **So the car's networks** take under a tenth of the 7.5 ms from a scan
+  to its command (what ForzaETH measured for their whole race stack on
+  NUC5), and the **cloud's could not run on the car**: six to seven scan
+  periods (25 ms) per scan, in twice the flash there is.
+- **The cloud's compute** (2.1 ms on one laptop core) is small against the
+  network's round trip: over commercial 5G (Verizon mmWave, non-standalone),
+  Narayanan et al. ("A First Look at Commercial 5G Performance on
+  Smartphones", WWW 2020) measured 27 ms to the first hop, 54 ms to a cloud
+  region on the same coast and 82 ms across the country: about the 25, 50
+  and 100 ms latencies the experiments use.
+- NUC5's own computer (an Intel i5-10210U, with about five of its eight
+  threads idle under ForzaETH's race stack) could run the large networks
+  itself in a few ms: the split assumes the networks run on a perception
+  processor of their own, not on the car's main computer.
+
 ## Use
 
 ```julia
@@ -194,6 +229,50 @@ see.)
   to 0.99): they share a part that neither can remove, which cancels in the
   difference z_car − z_cloud the tracker learns the car's bias from.
 
+## Widths, sight and clearance measured in the scan
+
+Three of the estimates are geometry the scan shows directly, given the lane
+center: a `ScanGeometry` measures them without a network, as their labels
+are measured on the map, but in the scan, where what the scan doesn't show
+(behind a wall, past the range, in the blind spot behind the car) counts as
+blocked:
+
+- `widths`: how far free space reaches along each side's normal, from the
+  center the car's networks give (`e`, `ψe`, `κ_profile`);
+- `sight`: how far along that center the scan shows it;
+- `clearance`: the free distance along each arc, keeping half the car's
+  width from every return, up to where the arc leaves what the scan shows.
+
+A `MixedEstimator` drives on them: it runs the networks as usual and takes
+these three from the scan instead, each with a fixed σ (its RMS error on
+the validation tracks, in `weights/fusion.toml`, with the noise the tracker
+needs, from `train/fusion.jl`):
+
+```julia
+g = ScanGeometry(beams, -0.013; hw=0.228 / 2)    # NUC5: front axle 0.013 m behind the LiDAR
+est = MixedEstimator(TieredEstimator(nets; schedule=FixedCalls(:κ_profile)), g, GEOMETRIC_ESTIMATES,
+                     load_sigmas("weights", :geometric))
+noise = load_noise("weights"; sources=(widths=:geometric, sight=:geometric, clearance=:geometric))
+```
+
+On the held-out tracks ([`train/results/networks.md`](train/results/networks.md)):
+
+- **clearance** is more accurate than the car's network (RMS 0.32 m
+  against 0.37 m) and errs toward less room: it exceeds the true free
+  distance by more than 0.25 m in 0.1% of the entries, the car network's
+  in 3%;
+- **widths** miss their labels by more (0.19 m against 0.10 m), because the
+  labels are measured from the true center and these from the estimated
+  one; but they put the corridor's walls where the walls are: 0.12 m RMS
+  from the true wall (median 3 cm), against the car network's 0.16 m
+  (median 4 cm) and the cloud's 0.09 m;
+- **sight** is less accurate (0.59 m against 0.22 m), measured along a
+  center that bends wrong far ahead when `κ_profile` does.
+
+How they drive is in LidarRacer.jl's results. The hand-written estimator
+(as `train/sources.jl` maps it onto the six estimates) is measured the same
+way, for comparison.
+
 ## Error distributions
 
 The errors are long-tailed, and one distribution fits them all: a **Student
@@ -231,12 +310,15 @@ julia -t auto --project=. collect.jl      # data/: labeled scans from every race
 julia -t auto --project=. train.jl        # weights/: all 18 networks (small_weak, small_strong, large)
 julia -t auto --project=. evaluate.jl     # results/networks.md (and .toml): cost and accuracy, on the held-out tracks
 julia -t auto --project=. errors.jl       # results/errors.md (and .toml): the error distributions
-julia -t auto --project=. fusion.jl       # weights/fusion.toml: the noise the tracker combines the tiers with
+julia -t auto --project=. fusion.jl       # weights/fusion.toml: the noise the tracker combines the tiers with (and the sources that are no network)
 julia --project=. plots.jl                # results/*.pdf: accuracy against MACs, the error distributions (from the .toml)
 ```
 
 - **Shared**: [`tracks.jl`](train/tracks.jl) (the track split, centerlines,
   distances to the walls; LidarRacer.jl's race scripts use it too),
+  [`sources.jl`](train/sources.jl) (the estimates from no network: the
+  hand-written estimator's and those measured in the scan; the race
+  scripts too),
   [`common.jl`](train/common.jl) (paths, loading the data, running a network
   over it) and [`tdist.jl`](train/tdist.jl) (fitting a Student t).
 - **Labels** ([`truth.jl`](train/truth.jl)): the true value of every

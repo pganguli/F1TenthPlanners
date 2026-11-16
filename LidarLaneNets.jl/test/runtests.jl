@@ -287,4 +287,69 @@ end
         @test s.status !== :lost
         @test s.e ≈ 1.0 atol = 0.05
     end
+
+    @testset "tracker: an unknown entry (NaN) is skipped" begin
+        unknown(k, t) = [meas(:κ_profile, t, :small, vcat(NaN, fill(0.1, NP - 1)))]
+        _, lane = run_tracker(20; extra=unknown)
+        @test isfinite(lane.e) && isfinite(lane.ψe) && isfinite(lane.κ)
+        @test lane.κ_profile[2:end] ≈ fill(0.1, NP - 1)
+    end
+
+    @testset "tracker: a profile's entries from different scans each move by their own distance" begin
+        prof = collect(Float64, PROFILE_S)
+        fresh = vcat(100 .+ (1:10), fill(NaN, NP - 10))
+        scans(k, t) = k == 0 ? [meas(:κ_profile, t, :small, prof)] : k == 4 ? [meas(:κ_profile, t, :small, fresh)] :
+                      Measurement[]
+        _, lane = run_tracker(5; v=2.5, extra=scans)   # 0.25 m driven since the first
+        @test lane.κ_profile[2:10] ≈ 100 .+ (2:10)         # the new scan's, where it measured
+        @test lane.κ_profile[11:end-1] ≈ prof[12:end]      # the old scan's past it, moved one entry
+        @test isnan(lane.κ_profile[end])
+    end
+
+    # A straight corridor in the LiDAR's frame: walls at y = ±1 m, one across at x = 6 m.
+    beams = range(-3π / 4, 3π / 4; length=NB)
+    corridor = map(beams) do a
+        t = min(abs(sin(a)) > 1e-9 ? 1 / abs(sin(a)) : Inf, cos(a) > 1e-9 ? 6 / cos(a) : Inf)
+        t > 10 ? 65.533 : t
+    end
+    g = ScanGeometry(beams, -0.013; hw=0.114)
+
+    @testset "measured in the scan" begin
+        x, y, h = center_line(0.0, 0.0, zeros(NP))
+        @test x[1:3] ≈ [0.0, 0.25, 0.5] && all(iszero, y)
+        w = scan_widths(g, corridor, x, y, h)
+        # (between beams, the nearer one counts: a little less room at grazing angles, never more)
+        @test all(0.98 .< w[1:20] .<= 1.0) && all(0.98 .< w[NP+1:NP+20] .<= 1.0)
+        @test all(isnan, w[26:NP])                     # past the wall across: not shown
+        @test scan_sight(g, corridor, x, y) == 6.0
+        c = scan_clearance(g, corridor)
+        @test c[7] ≈ 6.013 - 0.114 atol = 0.01          # straight ahead: the wall, less half the car
+        @test c[1] ≈ c[end] atol = 0.01                  # the corridor is symmetric
+        @test all(c .< 6.0)
+        # a left turn's center leaves the corridor through its left wall: seen only up to there
+        xl, yl, _ = center_line(0.0, 0.0, fill(0.5, NP))
+        @test scan_sight(g, corridor, xl, yl) < 3.0
+        # nothing within range: free as far as the arcs go
+        @test scan_clearance(g, fill(65.533, NB)) == fill(CLEARANCE_MAX, NK)
+    end
+
+    @testset "mixed estimator" begin
+        σ = Dict(:widths => fill(0.1, 2NP), :sight => [0.5], :clearance => fill(0.3, NK))
+        base = TieredEstimator((small=tier_nets(:small),); schedule=NoCalls())
+        mixed = MixedEstimator(base, g, GEOMETRIC_ESTIMATES, σ)
+        ms = observe!(mixed, corridor, 0.0)
+        ests = [m.estimate for m in ms]
+        # (untrained networks' unsure results are dropped; without a center, only clearance is measured)
+        centered = issubset((:e, :ψe, :κ_profile), ests)
+        @test allunique(ests) && :clearance in ests && (:widths in ests) == centered && (:sight in ests) == centered
+        cl = only(filter(m -> m.estimate === :clearance, ms))
+        @test cl.value ≈ scan_clearance(g, corridor) && cl.σ == σ[:clearance] && cl.tier === :small
+        @test mixed.calls == base.calls
+        # without a base, the source must give every estimate
+        @test_throws ArgumentError MixedEstimator(nothing, g, GEOMETRIC_ESTIMATES, σ)
+        all6 = Dict(est => zeros(output_size(est)) for est in ESTIMATES)
+        alone = MixedEstimator(nothing, (r, m) -> Dict(est => fill(1.0, output_size(est)) for est in ESTIMATES),
+            ESTIMATES, all6)
+        @test length(observe!(alone, corridor, 0.0)) == 6 && all(iszero, values(alone.calls))
+    end
 end

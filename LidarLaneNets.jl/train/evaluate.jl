@@ -12,66 +12,73 @@
 #   the validation tracks (what training picks the epoch by; 1 is perfect).
 # - Test RMS error, on the held-out tracks' scans while driving: profiles over
 #   the entries the car can see (no farther ahead than the true sight); the
-#   hand-written estimator over the entries it gives.
+#   hand-written estimator, and widths, sight and clearance measured in the
+#   scan (along the center small_weak gives; see sources.jl), over the
+#   entries they give.
 # - Within 1σ: how often the truth is within the network's own standard
 #   deviation (68% if calibrated).
 # - Error correlation with the large network's (for the small sets): how much
 #   a cloud result adds to the car's for the same scan.
 
-import LidarLaneEstimation as LLE
 using LinearAlgebra
 using Lux
 using Printf
 using StanleyController: Path, tracking_error
+using Statistics: median, quantile
 using TOML
 
 include("common.jl")
 
-# NUC5 and its LiDAR, as in F1Tenth.jl: the front axle 0.013 m behind the LiDAR.
-const BEAMS = range(-3π / 4, 3π / 4; length=1081)
-const X_REF = 0.130 - 0.143
-const HALFWIDTH = 0.228 / 2
+include("sources.jl")   # hand_estimates, geometric_estimates
 
-# The hand-written estimator as LidarRacer used it, with its curvature
-# profile reaching as far as the networks'.
-hand_config() = LLE.PerceptionConfig(car_halfwidth=HALFWIDTH, r_max=10.0, preview=PROFILE_LENGTH, jump=0.8)
-
-# The hand-written estimator's estimates for every scan in X (in order: it
-# keeps a running lane width). Profiles are NaN where it gives nothing.
-function hand_estimates(X)
-    p = LLE.LanePerception(BEAMS, X_REF; cfg=hand_config())
-    N, NP, NK = size(X, 2), length(PROFILE_S), length(CLEARANCE_K)
-    out = Dict(:e => zeros(1, N), :ψe => zeros(1, N), :κ_profile => fill(NaN, NP, N), :widths => fill(NaN, 2NP, N),
-        :sight => zeros(1, N), :clearance => zeros(NK, N))
-    none = 0
-    for j in 1:N
-        ranges = Float64.(view(X, :, j))
-        est = LLE.estimate_lane!(p, ranges)
-        if est.walls === :none
-            none += 1
-        else
-            out[:e][j], out[:ψe][j] = est.e, est.ψe
-            out[:κ_profile][:, j] .= est.κ_profile
-            out[:sight][j] = min(est.sight, SIGHT_MAX)
-            # the room to each side, at the points beside and ahead of the front axle
-            m = 0.01
-            c = LLE.lane_corridor(p, m; step=0.2)
-            if c !== nothing
-                s = vcat(0.0, cumsum(hypot.(diff(c.x), diff(c.y))))
-                s_ref = tracking_error(Path(c.x, c.y), X_REF, 0.0, 0.0).s
-                for (k, d) in enumerate(PROFILE_S)
-                    u = s_ref + d
-                    (0 <= u <= s[end]) || continue
-                    i = clamp(searchsortedlast(s, u), 1, length(s) - 1)
-                    f = (u - s[i]) / (s[i+1] - s[i])
-                    out[:widths][k, j] = m + (1 - f) * c.upper[i] + f * c.upper[i+1]
-                    out[:widths][NP+k, j] = m - ((1 - f) * c.lower[i] + f * c.lower[i+1])
-                end
-            end
-        end
-        out[:clearance][:, j] .= [min(LLE.clearance(p, κ), CLEARANCE_MAX) for κ in CLEARANCE_K]
+# Where the corridor's walls end up. The planner rebuilds the lane center from
+# e, ψe and κ_profile and puts each wall at its width along the center's
+# normal (LidarRacer.lane_center); the labels give the widths from the true
+# center. So a width measured from an estimated center can miss its label and
+# still put the wall where it is: what counts is the distance from each wall
+# point (within the true sight) to the true wall (the true center and widths,
+# likewise).
+function _seg_dist(px, py, xs, ys)
+    best = Inf
+    for k in 1:length(xs)-1
+        ax, ay = xs[k], ys[k]
+        dx, dy = xs[k+1] - ax, ys[k+1] - ay
+        L2 = dx^2 + dy^2
+        t = L2 < 1e-12 ? 0.0 : clamp(((px - ax) * dx + (py - ay) * dy) / L2, 0.0, 1.0)
+        best = min(best, hypot(px - ax - t * dx, py - ay - t * dy))
     end
-    return out, none / N
+    return best
+end
+
+function _walls(e, ψe, κ, w)
+    np = length(PROFILE_S)
+    x, y, h = center_line(e, ψe, κ; reach=PROFILE_LENGTH)
+    return (x .- sin.(h) .* w[1:np], y .+ cos.(h) .* w[1:np]), (x .+ sin.(h) .* w[np+1:end], y .- cos.(h) .* w[np+1:end])
+end
+
+"""
+    wall_distances(Y, E) -> Vector
+
+For each scan (column) of the labels `Y`, the distance [m] from every wall
+point of the corridor that the estimates `E` (`:e`, `:ψe`, `:κ_profile`,
+`:widths`, as matrices) give, within the true sight, to the true wall on the
+same side.
+"""
+function wall_distances(Y, E)
+    out = [Float64[] for _ in 1:Threads.maxthreadid()]
+    Threads.@threads :static for j in axes(Y[:e], 2)
+        vis = findall(PROFILE_S .<= Y[:sight][1, j])
+        length(vis) < 2 && continue
+        c = (E[:e][1, j], E[:ψe][1, j], E[:κ_profile][:, j])
+        isfinite(c[1]) && isfinite(c[2]) || continue
+        TL, TR = _walls(Y[:e][1, j], Y[:ψe][1, j], Y[:κ_profile][:, j], Y[:widths][:, j])
+        EL, ER = _walls(c..., E[:widths][:, j])
+        for (est, tru) in ((EL, TL), (ER, TR)), i in vis
+            isfinite(est[1][i]) && isfinite(est[2][i]) &&
+                push!(out[Threads.threadid()], _seg_dist(est[1][i], est[2][i], tru[1][vis], tru[2][vis]))
+        end
+    end
+    return reduce(vcat, out)
 end
 
 # MACs of a layer for an input of length L with C channels; returns (macs, L, C).
@@ -105,6 +112,10 @@ function main()
     Yd = Dict(k => v[:, driving] for (k, v) in Yte)
     println("test: $(size(Xte, 2)) scans ($(count(driving)) while driving); validation: $(size(Xva, 2))")
     hand, none = hand_estimates(Xte)
+    # widths, sight and clearance measured in the scan, along the center the car's networks give
+    center = Dict(est => first(means_sigmas(load_net(weights_file(WEIGHTS_DIR, est, :small_weak)), Xte))
+                  for est in (:e, :ψe, :κ_profile))
+    geo = geometric_estimates(Xte, center[:e], center[:ψe], center[:κ_profile])
 
     totals = Dict(name => [0, 0] for name in NETWORKS)
     data = Dict{String,Any}()   # the numbers, for plots.jl: estimate => network set => …
@@ -117,6 +128,12 @@ function main()
         ok = M .& isfinite.(h)
         push!(rows, "| `$est` | hand-written | – | 1081 | – | – | – | $(g(rmse((h .- Yd[est])[ok]))) | $(UNITS[est]) | " *
                     "$(round(Int, 100count(ok) / count(M)))% | – | – |")
+        if est in GEOMETRIC_ESTIMATES
+            h = geo[est][:, driving]
+            ok = M .& isfinite.(h)
+            push!(rows, "| `$est` | measured in the scan | – | 1081 | – | – | – | $(g(rmse((h .- Yd[est])[ok]))) | " *
+                        "$(UNITS[est]) | $(round(Int, 100count(ok) / count(M)))% | – | – |")
+        end
         errs = Dict{Symbol,Vector{Float64}}()
         nets = Dict(name => load_net(weights_file(WEIGHTS_DIR, est, name)) for name in NETWORKS)
         stats = Dict{Symbol,Any}()
@@ -141,7 +158,7 @@ function main()
             push!(rows, "| `$est` | $name | [`$file`](../../weights/$file) | $(input_size(nets[name])) | $(commas(m)) | " *
                         "$(commas(p)) | $(g(r2)) | $(g(e)) | $(UNITS[est]) | 100% | $(round(Int, 100cal))% | $ρ |")
         end
-        foreach(println, rows[end-3:end])
+        foreach(println, rows[end-(est in GEOMETRIC_ESTIMATES ? 4 : 3):end])
     end
     summary = ["| Network set | Runs on | Weights | Beams in | MACs per scan, all six | Parameters, all six |",
         "|---|---|---|---|---|---|"]
@@ -165,8 +182,36 @@ function main()
         $(join(summary, "\n"))
 
         $(join(rows, "\n"))
+
+        ## Where the corridor's walls end up
+
+        The path planner rebuilds the lane center from `e`, `ψe` and `κ_profile` and puts each wall at its
+        width along the center's normal. The `widths` labels are measured from the true center, so widths
+        measured in the scan from an estimated center miss their labels by that center's error, yet put
+        the walls where they are. What the planner needs is the walls: the distance from every wall point
+        (within the true sight) to the true wall.
+
+        $(join(walls_table(Xte, Yd, driving, hand, geo), "\n"))
         """)
     println.(summary)
+end
+
+# The corridor walls' placement (see wall_distances), on the test tracks' driving scans.
+function walls_table(Xte, Yd, driving, hand, geo)
+    est(name) = Dict(e => first(means_sigmas(load_net(weights_file(WEIGHTS_DIR, e, name)), Xte))[:, driving]
+                     for e in (:e, :ψe, :κ_profile, :widths))
+    sw = est(:small_weak)
+    sources = [("hand-written", Dict(e => hand[e][:, driving] for e in (:e, :ψe, :κ_profile, :widths))),
+        ("small_weak", sw), ("large", est(:large)),
+        ("small_weak's center, widths measured in the scan", merge(sw, Dict(:widths => geo[:widths][:, driving])))]
+    rows = ["| Center and widths from | Wall points | RMS distance to the true wall [m] | Median [m] | 95th percentile [m] |",
+        "|---|---|---|---|---|"]
+    for (name, E) in sources
+        d = wall_distances(Yd, E)
+        push!(rows, "| $name | $(commas(length(d))) | $(g(rmse(d); d=3)) | $(g(median(d); d=3)) | $(g(quantile(d, 0.95); d=3)) |")
+        println(rows[end])
+    end
+    return rows
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

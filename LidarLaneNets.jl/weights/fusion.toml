@@ -1,7 +1,71 @@
 # Noise parameters for fusing the car's and the cloud's results (LidarLaneNets.load_noise),
 # measured on the validation tracks by train/fusion.jl. Per estimate: persist, tau [s] and
 # sigma_bias (the car network's error that persists from scan to scan), nu (Student t tail
-# weight of the errors over the network's own σ).
+# weight of the errors over the network's own σ). For the sources that are no network (hand,
+# geometric), also sigma: the fixed σ of each entry (its RMS error on the validation tracks).
+
+[geometric.clearance]
+nu = 1.73
+persist = 0.987
+sigma = [0.565, 0.316, 0.314, 0.21, 0.409, 0.637, 0.128, 0.328, 0.431, 0.491, 0.361, 0.233, 0.342]
+sigma_bias = 0.388
+tau = 0.265
+
+[geometric.sight]
+nu = 0.417
+persist = 0.858
+sigma = [0.548]
+sigma_bias = 0.507
+tau = 0.205
+
+[geometric.widths]
+nu = 1.86
+persist = 0.81
+sigma = [0.037, 0.0352, 0.0337, 0.0354, 0.0382, 0.0423, 0.0486, 0.0557, 0.0637, 0.0725, 0.084, 0.0911, 0.0984, 0.107, 0.116, 0.126, 0.137, 0.148, 0.162, 0.179, 0.189, 0.186, 0.19, 0.191, 0.197, 0.206, 0.214, 0.22, 0.228, 0.233, 0.242, 0.254, 0.261, 0.14, 0.136, 0.116, 0.105, 0.1, 0.103, 0.105, 0.104, 0.112, 0.122, 0.138, 0.141, 0.152, 0.175, 0.19, 0.187, 0.204, 0.216, 0.223, 0.234, 0.244, 0.249, 0.253, 0.261, 0.265, 0.27, 0.269, 0.274, 0.277, 0.282, 0.285, 0.289, 0.289]
+sigma_bias = 0.162
+tau = 0.314
+
+[hand.clearance]
+nu = 1.26
+persist = 0.912
+sigma = [0.638, 0.527, 0.733, 0.953, 1.14, 1.13, 0.115, 0.991, 0.74, 0.732, 0.485, 0.518, 0.615]
+sigma_bias = 0.734
+tau = 0.36
+
+[hand.e]
+nu = 600.0
+persist = 0.806
+sigma = [0.0443]
+sigma_bias = 0.0398
+tau = 1.77
+
+[hand.kappa_profile]
+nu = 1.35
+persist = 0.886
+sigma = [0.0469, 0.0451, 0.0412, 0.0368, 0.0347, 0.0334, 0.0328, 0.0313, 0.0318, 0.0324, 0.0345, 0.0377, 0.0414, 0.045, 0.0473, 0.0497, 0.0523, 0.0536, 0.0555, 0.0565, 0.0567, 0.0564, 0.0567, 0.0576, 0.0581, 0.0587, 0.0577, 0.058, 0.0572, 0.0551, 0.0538, 0.0509, 0.0455]
+sigma_bias = 0.045
+tau = 0.223
+
+[hand.psi_e]
+nu = 16.1
+persist = 0.0936
+sigma = [0.0655]
+sigma_bias = 0.0201
+tau = 0.0361
+
+[hand.sight]
+nu = 1.92
+persist = 0.986
+sigma = [1.58]
+sigma_bias = 1.57
+tau = 2.93
+
+[hand.widths]
+nu = 1.73
+persist = 0.44
+sigma = [0.0541, 0.0521, 0.0492, 0.0461, 0.0441, 0.0569, 0.0703, 0.0501, 0.0841, 0.0613, 0.0697, 0.0891, 0.0868, 0.0962, 0.145, 0.104, 0.0994, 0.0807, 0.0905, 0.103, 0.107, 0.123, 0.066, 0.071, 0.107, 0.057, 0.0698, 0.0654, 0.0581, 0.0613, 0.0575, 0.0572, 0.0571, 0.144, 0.141, 0.124, 0.113, 0.108, 0.109, 0.114, 0.119, 0.118, 0.115, 0.12, 0.126, 0.142, 0.145, 0.138, 0.128, 0.131, 0.143, 0.195, 0.151, 0.144, 0.151, 0.154, 0.146, 0.127, 0.142, 0.118, 0.114, 0.107, 0.12, 0.111, 0.114, 0.118]
+sigma_bias = 0.0725
+tau = 0.434
 
 [large.clearance]
 nu = 18.6

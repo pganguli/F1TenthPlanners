@@ -11,7 +11,10 @@
 # - sigma_bias: the standard deviation of that persisting part;
 # - nu: the Student t degrees of freedom of the errors over the network's own
 #   σ (a tail weight for the robust updates).
-# For the large (cloud) set, nu alone.
+# For the large (cloud) set, nu alone. And the same as for a small set for
+# the sources that are no network (sources.jl: the hand-written estimator,
+# and widths, sight and clearance measured in the scan), with their fixed σ
+# per entry (sigma: the RMS error here), as they give none of their own.
 
 using Printf
 using Random
@@ -19,6 +22,7 @@ using TOML
 
 include("common.jl")
 include("tdist.jl")   # fit_t
+include("sources.jl")   # hand_estimates, geometric_estimates
 
 const LAGS = 1:20
 const DT = 0.025
@@ -63,6 +67,28 @@ function fit_persistence(ρ)
     return best[2], best[3]
 end
 
+# The noise parameters of a car source's errors E (the source's σ: S), over
+# the entries M says count; with `small`, also how they persist.
+function noise_entry(E, S, M, runs, drive, rng; small::Bool, label)
+    z = (E./S)[:, drive][M[:, drive]]
+    length(z) > MAX_FIT && (z = z[randperm(rng, length(z))[1:MAX_FIT]])
+    ν = fit_t(z)[1].ν
+    entry = Dict{String,Any}("nu" => round(ν; sigdigits=3))
+    if small
+        ρ = [autocorr(E, M, runs, k) for k in LAGS]
+        f, a = fit_persistence(ρ)
+        errs = E[:, drive][M[:, drive]]
+        entry["persist"] = round(f; sigdigits=3)
+        entry["tau"] = round(-DT / log(a); sigdigits=3)
+        entry["sigma_bias"] = round(sqrt(f * mean(abs2, errs)); sigdigits=3)
+        @printf("%-24s persist %.2f  tau %.3f s  sigma_bias %.4g  nu %.3g   (ρ1 %.2f, ρ5 %.2f, ρ20 %.2f)\n",
+            label, f, -DT / log(a), entry["sigma_bias"], ν, ρ[1], ρ[5], ρ[20])
+    else
+        @printf("%-24s nu %.3g\n", label, ν)
+    end
+    return entry
+end
+
 function main()
     X, Y, files = load_all(VAL_TRACKS)
     runs = driving_runs(files)
@@ -75,23 +101,27 @@ function main()
         for est in ESTIMATES
             net = load_net(weights_file(WEIGHTS_DIR, est, name))
             μ, σ = means_sigmas(net, X)
-            E = μ .- Y[est]
-            z = (E./σ)[:, drive][M[est][:, drive]]
-            length(z) > MAX_FIT && (z = z[randperm(rng, length(z))[1:MAX_FIT]])
-            ν = fit_t(z)[1].ν
-            entry = Dict{String,Any}("nu" => round(ν; sigdigits=3))
-            if network_tier(name) === :small
-                ρ = [autocorr(E, M[est], runs, k) for k in LAGS]
-                f, a = fit_persistence(ρ)
-                errs = E[:, drive][M[est][:, drive]]
-                entry["persist"] = round(f; sigdigits=3)
-                entry["tau"] = round(-DT / log(a); sigdigits=3)
-                entry["sigma_bias"] = round(sqrt(f * mean(abs2, errs)); sigdigits=3)
-                @printf("%-12s %-10s persist %.2f  tau %.3f s  sigma_bias %.4g  nu %.3g   (ρ1 %.2f, ρ5 %.2f, ρ20 %.2f)\n",
-                    name, est, f, -DT / log(a), entry["sigma_bias"], ν, ρ[1], ρ[5], ρ[20])
-            else
-                @printf("%-12s %-10s nu %.3g\n", name, est, ν)
-            end
+            section[file_name(est)] = noise_entry(μ .- Y[est], σ, M[est], runs, drive, rng;
+                small=network_tier(name) === :small, label="$name $est")
+        end
+        out[String(name)] = section
+    end
+    # the sources that give no σ of their own (sources.jl): a fixed σ per
+    # entry, their RMS error here (over what they give)
+    center = Dict(est => first(means_sigmas(load_net(weights_file(WEIGHTS_DIR, est, :small_weak)), X))
+                  for est in (:e, :ψe, :κ_profile))
+    given = Dict(:hand => first(hand_estimates(X)),
+        :geometric => geometric_estimates(X, center[:e], center[:ψe], center[:κ_profile]))
+    for name in SOURCES
+        section = Dict{String,Any}()
+        for est in source_estimates(name)
+            E = given[name][est] .- Y[est]
+            Mk = M[est] .& isfinite.(E)
+            all_errs = E[:, drive][Mk[:, drive]]
+            S = [(e = E[r, drive][Mk[r, drive]]; length(e) >= 100 ? sqrt(mean(abs2, e)) : sqrt(mean(abs2, all_errs)))
+                 for r in axes(E, 1)]
+            entry = noise_entry(E, S, Mk, runs, drive, rng; small=true, label="$name $est")
+            entry["sigma"] = round.(S; sigdigits=3)
             section[file_name(est)] = entry
         end
         out[String(name)] = section
@@ -100,7 +130,8 @@ function main()
         println(io, "# Noise parameters for fusing the car's and the cloud's results (LidarLaneNets.load_noise),")
         println(io, "# measured on the validation tracks by train/fusion.jl. Per estimate: persist, tau [s] and")
         println(io, "# sigma_bias (the car network's error that persists from scan to scan), nu (Student t tail")
-        println(io, "# weight of the errors over the network's own σ).")
+        println(io, "# weight of the errors over the network's own σ). For the sources that are no network (hand,")
+        println(io, "# geometric), also sigma: the fixed σ of each entry (its RMS error on the validation tracks).")
         TOML.print(io, out; sorted=true)
     end
 end

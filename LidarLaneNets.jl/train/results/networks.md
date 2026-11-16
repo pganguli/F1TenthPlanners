@@ -27,14 +27,32 @@ test scans (it then gives zeros). The error distributions are in [errors.md](err
 | `κ_profile` | small_strong | [`small_strong_kappa_profile.jld2`](../../weights/small_strong_kappa_profile.jld2) | 271 | 131,520 | 41,170 | 0.7848 | 0.07986 | 1/m | 100% | 83% | 0.93 |
 | `κ_profile` | large | [`large_kappa_profile.jld2`](../../weights/large_kappa_profile.jld2) | 1081 | 4,252,112 | 719,668 | 0.8117 | 0.07144 | 1/m | 100% | 79% | – |
 | `widths` | hand-written | – | 1081 | – | – | – | 0.1014 | m | 95% | – | – |
+| `widths` | measured in the scan | – | 1081 | – | – | – | 0.1896 | m | 99% | – | – |
 | `widths` | small_weak | [`small_weak_widths.jld2`](../../weights/small_weak_widths.jld2) | 136 | 20,816 | 9,260 | 0.702 | 0.09949 | m | 100% | 63% | 0.99 |
 | `widths` | small_strong | [`small_strong_widths.jld2`](../../weights/small_strong_widths.jld2) | 271 | 135,744 | 45,460 | 0.7108 | 0.09844 | m | 100% | 64% | 1.0 |
 | `widths` | large | [`large_widths.jld2`](../../weights/large_widths.jld2) | 1081 | 4,264,784 | 732,472 | 0.7112 | 0.0985 | m | 100% | 65% | – |
 | `sight` | hand-written | – | 1081 | – | – | – | 1.726 | m | 100% | – | – |
+| `sight` | measured in the scan | – | 1081 | – | – | – | 0.5895 | m | 100% | – | – |
 | `sight` | small_weak | [`small_weak_sight.jld2`](../../weights/small_weak_sight.jld2) | 136 | 16,656 | 4,970 | 0.9858 | 0.222 | m | 100% | 82% | 0.75 |
 | `sight` | small_strong | [`small_strong_sight.jld2`](../../weights/small_strong_sight.jld2) | 271 | 127,424 | 37,010 | 0.9905 | 0.1857 | m | 100% | 73% | 0.93 |
 | `sight` | large | [`large_sight.jld2`](../../weights/large_sight.jld2) | 1081 | 4,239,824 | 707,252 | 0.992 | 0.1685 | m | 100% | 64% | – |
 | `clearance` | hand-written | – | 1081 | – | – | – | 0.8553 | m | 100% | – | – |
+| `clearance` | measured in the scan | – | 1081 | – | – | – | 0.3171 | m | 100% | – | – |
 | `clearance` | small_weak | [`small_weak_clearance.jld2`](../../weights/small_weak_clearance.jld2) | 136 | 17,424 | 5,762 | 0.7182 | 0.3715 | m | 100% | 65% | 0.61 |
 | `clearance` | small_strong | [`small_strong_clearance.jld2`](../../weights/small_strong_clearance.jld2) | 271 | 128,960 | 38,570 | 0.8435 | 0.2815 | m | 100% | 65% | 0.84 |
 | `clearance` | large | [`large_clearance.jld2`](../../weights/large_clearance.jld2) | 1081 | 4,244,432 | 711,908 | 0.8997 | 0.2179 | m | 100% | 60% | – |
+
+## Where the corridor's walls end up
+
+The path planner rebuilds the lane center from `e`, `ψe` and `κ_profile` and puts each wall at its
+width along the center's normal. The `widths` labels are measured from the true center, so widths
+measured in the scan from an estimated center miss their labels by that center's error, yet put
+the walls where they are. What the planner needs is the walls: the distance from every wall point
+(within the true sight) to the true wall.
+
+| Center and widths from | Wall points | RMS distance to the true wall [m] | Median [m] | 95th percentile [m] |
+|---|---|---|---|---|
+| hand-written | 1,405,098 | 0.336 | 0.131 | 0.732 |
+| small_weak | 1,484,002 | 0.162 | 0.0416 | 0.309 |
+| large | 1,484,002 | 0.0891 | 0.0273 | 0.158 |
+| small_weak's center, widths measured in the scan | 1,462,564 | 0.117 | 0.0303 | 0.136 |

@@ -14,6 +14,8 @@ a large one that runs in the cloud.
 - [`LaneTracker`](@ref), [`track!`](@ref): combines the results over time
   into a [`LaneState`](@ref), with each result counted at the time of its
   scan.
+- [`ScanGeometry`](@ref), [`MixedEstimator`](@ref): widths, sight and
+  clearance measured directly in the scan instead of by networks.
 
 Everything is relative to the lane center, at the front axle, in the car's
 frame: x forward, y to the left, angles counterclockwise.
@@ -33,11 +35,13 @@ export input_size, input_stride, beam_stride, predict
 export save_net, load_net, load_nets, weights_file
 export Measurement, SelectorConfig, TieredEstimator, observe!, set_schedule!
 export CloudSchedule, cloud_calls, NoCalls, AllCalls, FixedCalls, RoundRobin
-export TrackerConfig, LaneTracker, LaneState, track!, EstimateNoise, default_noise, load_noise
+export TrackerConfig, LaneTracker, LaneState, track!, EstimateNoise, default_noise, load_noise, load_sigmas
+export ScanGeometry, center_line, scan_widths, scan_sight, scan_clearance, GEOMETRIC_ESTIMATES, MixedEstimator
 
 include("estimates.jl")
 include("nets.jl")
 include("tiers.jl")
 include("tracker.jl")
+include("geometry.jl")
 
 end # module
