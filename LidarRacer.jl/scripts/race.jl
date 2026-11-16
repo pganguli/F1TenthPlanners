@@ -36,6 +36,42 @@ const DEFAULT_WEIGHTS = joinpath(@__DIR__, "..", "..", "LidarLaneNets.jl", "weig
 # The track split (TEST_TRACKS: never seen in training), centerlines, and the
 # walls' distances, shared with LidarLaneNets.jl's training.
 include(joinpath(@__DIR__, "..", "..", "LidarLaneNets.jl", "train", "tracks.jl"))
+# The estimates from no network (the hand-written estimator's, and those
+# measured in the scan), also shared with the training.
+include(joinpath(@__DIR__, "..", "..", "LidarLaneNets.jl", "train", "sources.jl"))
+
+# The hand-written estimator as a source for a Racer's `mix`.
+struct HandSource
+    p::LLE.LanePerception
+end
+(h::HandSource)(ranges, meas) = hand_estimate!(h.p, ranges)
+
+"""
+    estimate_mix(source, beams, car; weights) -> named tuple or nothing
+
+What a [`Racer`](@ref)'s `mix` is for the estimates' `source`: `:nets` (the
+car's networks for every estimate: `nothing`), `:hand` (the hand-written
+estimator for every estimate) or `:geometric` (widths, sight and clearance
+measured in the scan, the rest from the networks); with the fixed standard
+deviations measured for it (`weights/fusion.toml`).
+"""
+function estimate_mix(source::Symbol, beams, car; weights=DEFAULT_WEIGHTS)
+    source === :nets && return nothing
+    σ = load_sigmas(weights, source)
+    source === :hand && return (source=HandSource(hand_perception(beams, X_REF)), estimates=ESTIMATES, σ)
+    source === :geometric &&
+        return (source=ScanGeometry(beams, X_REF; hw=car.width / 2), estimates=GEOMETRIC_ESTIMATES, σ)
+    throw(ArgumentError("unknown source $source"))
+end
+
+"""
+    source_noise(source; weights, small) -> NamedTuple
+
+The tracker's noise for the estimates' `source` (see [`estimate_mix`](@ref)).
+"""
+source_noise(source::Symbol; weights=DEFAULT_WEIGHTS, small=:small_weak) =
+    source === :nets ? load_noise(weights; small) :
+    load_noise(weights; small, sources=NamedTuple(est => source for est in source_estimates(source)))
 
 const USAGE = """
 usage: race.jl MAP [options]
@@ -57,6 +93,10 @@ options:
                    results (default 0)
   --small SET      the car's networks: small_weak (the default) or small_strong;
                    the cloud's are always the large set
+  --source WHERE   where the car's estimates come from: nets (its networks;
+                   the default), hand (the hand-written estimator, every
+                   estimate; no cloud), or geometric (widths, sight and
+                   clearance measured in the scan, the rest from its networks)
   --weights DIR    where the networks are (default ../LidarLaneNets.jl/weights)
   --speed V        cap the speed at V m/s (default: the car's top speed)
   --laps N         laps to drive (default 1)
@@ -130,11 +170,12 @@ function wall_gap(m::F1Tenth.MapData, x, y, θ, length, width)
 end
 
 """
-    run_map(map_name; nets, schedule, speed, laps, pose, map_ext, render, timestep, max_time, seed, racer...) -> RunResult
+    run_map(map_name; nets, schedule, source, speed, laps, pose, map_ext, render, timestep, max_time, seed, racer...) -> RunResult
 
 Drive `laps` laps (or until a crash or `max_time` seconds) with a
 [`Racer`](@ref) on the networks `nets`, calling the cloud as `schedule()`
-(a function making a fresh `CloudSchedule`) decides; `speed` caps the speed,
+(a function making a fresh `CloudSchedule`) decides, with the estimates
+from `source` (see [`estimate_mix`](@ref)); `speed` caps the speed,
 and any other keywords (`selector`, `tracking`, `stanley`, `margin`,
 `latency`, `k_σ`) replace the Racer's defaults. `tracking` defaults to
 the noise measured for the default networks (weights/fusion.toml).
@@ -143,8 +184,8 @@ command's latency is timed), and `seed` seeds the LiDAR noise and the
 simulated network's dropouts. With `render`,
 the run is drawn at `RENDER_FPS` and paced to real time.
 """
-function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
-                 tracking=TrackerConfig(noise=load_noise(DEFAULT_WEIGHTS)), speed=nothing, laps=1, pose=nothing,
+function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin, source=:nets,
+                 tracking=TrackerConfig(noise=source_noise(source)), speed=nothing, laps=1, pose=nothing,
                  map_ext=".png", render=false, timestep=0.0025, max_time=600.0, seed=12345, racer...)
     path = centerline(map_name)
     if pose === nothing
@@ -155,7 +196,8 @@ function run_map(map_name; nets=load_nets(DEFAULT_WEIGHTS), schedule=RoundRobin,
     walls = env.sim.scan_simulator.map
     params = env.params
     car = CarParams(params)
-    controller = Racer(car, env.sim.agents[1].lidar.scan_angles, nets; schedule=schedule(),
+    beams = env.sim.agents[1].lidar.scan_angles
+    controller = Racer(car, beams, nets; schedule=schedule(), mix=estimate_mix(source, beams, car),
         tracking, rng=Xoshiro(seed), v_max=something(speed, car.speed_cmd_max), racer...)
 
     render && add_render_callback!(env, e -> render_callback(e, env, controller))
@@ -302,7 +344,7 @@ function parse_args(args)
     isempty(args) && (print(USAGE); exit(1))
     opts = Dict{Symbol,Any}(:map => args[1], :speed => nothing, :laps => 1, :pose => nothing,
         :map_ext => ".png", :render => false, :cloud => "roundrobin", :cloud_only => false, :cloud_latency => 25.0,
-        :cloud_drop => 0.0, :weights => DEFAULT_WEIGHTS, :small => "small_weak")
+        :cloud_drop => 0.0, :weights => DEFAULT_WEIGHTS, :small => "small_weak", :source => "nets")
     i = 2
     while i <= length(args)
         a = args[i]
@@ -328,6 +370,8 @@ function parse_args(args)
             opts[:weights] = args[i+1]; i += 2
         elseif a == "--small"
             opts[:small] = args[i+1]; i += 2
+        elseif a == "--source"
+            opts[:source] = args[i+1]; i += 2
         else
             print(USAGE); error("unknown option $a")
         end
@@ -348,8 +392,9 @@ end
 function main(args=ARGS)
     o = parse_args(args)
     nets = load_nets(o[:weights]; small=Symbol(o[:small]))
-    racer = (; nets, schedule=schedule_maker(o[:cloud]),
-        tracking=TrackerConfig(noise=load_noise(o[:weights]; small=Symbol(o[:small]))),
+    source = Symbol(o[:source])
+    racer = (; nets, schedule=schedule_maker(o[:cloud]), source,
+        tracking=TrackerConfig(noise=source_noise(source; weights=o[:weights], small=Symbol(o[:small]))),
         selector=SelectorConfig(remote_latency=o[:cloud_latency] / 1000, remote_drop=o[:cloud_drop],
             use_small=!o[:cloud_only]))
     if o[:map] in ("all", "test")

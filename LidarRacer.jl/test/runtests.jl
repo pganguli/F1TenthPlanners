@@ -63,6 +63,13 @@ planner(; kwargs...) = Planner(CarParams(CAR); sweep=0.75 / CAR.scan_rate, kwarg
         s = lane()
         s.κ_profile[6] = NaN
         @test length(lane_center(s, 8.0)[1]) == 2 + 4
+        # unknown room beside the car counts as none: the line can't leave the center
+        s = lane(e=0.3)
+        s.w_left[1] = NaN
+        _, _, _, wl, _ = lane_center(s, 4.0)
+        @test wl[1] == 0 && wl[2] == 0
+        steer, _, plan = drive(planner(), s, 3.0, 0.0)
+        @test isfinite(steer) && all(isfinite, plan.y)
     end
 
     @testset "straight lane, centered" begin
@@ -137,5 +144,16 @@ planner(; kwargs...) = Planner(CarParams(CAR); sweep=0.75 / CAR.scan_rate, kwarg
         r = Racer(CAR, BEAMS, NETS; selector=SelectorConfig(max_σ=never))
         steer, speed, s = control!(r, ranges, 3.0, 0.0, 0.025)
         @test s.status === :lost && speed == 0 && steer == 0
+        # widths, sight and clearance measured in the scan instead
+        geo = ScanGeometry(BEAMS, -0.013; hw=CAR.width / 2)
+        σ = Dict(:widths => fill(0.1, 2NP), :sight => [0.5], :clearance => fill(0.3, NK))
+        r = Racer(CAR, BEAMS, NETS; selector=SelectorConfig(max_σ=trusting),
+            mix=(source=geo, estimates=GEOMETRIC_ESTIMATES, σ))
+        @test r.estimator isa MixedEstimator
+        for _ in 1:5
+            steer, speed, s = control!(r, ranges, 3.0, 0.0, 0.025)
+        end
+        @test s.status === :ok && isfinite(steer) && speed >= 0
+        @test s.clearance ≈ scan_clearance(geo, ranges)
     end
 end

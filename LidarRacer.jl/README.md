@@ -85,6 +85,8 @@ julia -t auto --project=scripts scripts/race.jl all       # all 23 racetracks, i
 julia --project=scripts scripts/race.jl Spa --speed 3     # cap the speed
 julia --project=scripts scripts/race.jl path/to/map --pose X Y THETA
 julia -t auto --project=scripts scripts/race.jl test --cloud none    # held-out tracks, small networks only
+julia -t auto --project=scripts scripts/race.jl test --cloud none --source hand        # the hand-written estimator
+julia -t auto --project=scripts scripts/race.jl test --cloud κ_profile --source geometric   # widths, sight, clearance from the scan
 julia --project=scripts scripts/race.jl Spa --cloud all --cloud-only --cloud-latency 100
 julia -t auto --project=scripts scripts/compare.jl --seeds 8 50 100   # every configuration (results/compare-small_weak.md)
 ```
@@ -128,7 +130,12 @@ to score the run.
 The networks never saw these five tracks (Spa, Monza, Silverstone,
 Oschersleben, YasMarina) in training. Every configuration ran one lap of
 each, 8 times (a seed sets the LiDAR's noise and where the lap starts): 40
-runs. `small_weak` runs on the car and `large` in the cloud. Safety is
+runs. `small_weak` runs on the car and `large` in the cloud; two configurations
+take some estimates from elsewhere, with the same tracker, planner and
+controllers: the hand-written estimator (LidarLaneEstimation.jl, mapped
+onto the six estimates by LidarLaneNets.jl's `train/sources.jl`) for all
+six, and widths, sight and clearance measured in the scan (LidarLaneNets.jl's
+`ScanGeometry`) with the car's networks for the rest. Safety is
 measured from the true map and state. The full tables, with 95% confidence
 intervals, run-for-run differences against the car's networks alone, and
 lap times, are in
@@ -141,20 +148,42 @@ Crashes in 40 runs:
 | Estimates from | Cloud calls per scan | 25 ms cloud latency | 50 ms | 100 ms |
 |---|---|---|---|---|
 | the car's networks only | 0 | 8 | 8 | 8 |
+| the hand-written estimator | 0 | **0** | **0** | **0** |
+| the car's networks; widths, sight, clearance from the scan | 0 | **0** | **0** | **0** |
 | the cloud's only | 6 | **0** | **0** | 4 |
 | the car's, and the cloud's for every estimate | 6 | **0** | **0** | 8 |
 | the car's, and the cloud's in turn (round robin) | 1 | 3 | 7 | 8 |
 | the car's, and the cloud's far ahead (κ_profile, widths, sight) | 3 | **0** | **0** | 8 |
+| widths, sight, clearance from the scan; the car's and the cloud's κ_profile | 1 | **0** | **0** | **0** |
 
-How close the car came to the walls, at 50 ms (a public cloud over 5G):
+How close the car came to the walls, at 50 ms (about a nearby cloud region
+over 5G: Narayanan et al., WWW 2020, measured 54 ms round trips):
 
 | Estimates from | Closest to a wall, worst run | Closest to a wall, mean | Time within 0.2 m of a wall | Scans with time to collision under 0.5 s | Heading error (RMS) |
 |---|---|---|---|---|---|
 | the car's networks only | 0.07 m | 0.27 m | 0.24% | 0.95% | 1.93° |
+| the hand-written estimator | **0.43 m** | **0.51 m** | **0%** | **0%** | 2.29° |
+| the car's networks; widths, sight, clearance from the scan | 0.07 m | 0.32 m | 0.14% | 0.05% | 1.44° |
 | the cloud's only | 0.10 m | 0.33 m | 0.16% | 0.15% | 1.93° |
 | the car's, and the cloud's for every estimate | **0.19 m** | 0.36 m | **0.02%** | **0%** | **1.23°** |
 | the car's, and the cloud's far ahead | **0.19 m** | 0.36 m | **0.01%** | **0.01%** | **1.25°** |
+| widths, sight, clearance from the scan; the car's and the cloud's κ_profile | 0.16 m | 0.36 m | 0.01% | **0%** | 1.35° |
 
+- **The hand-written estimator is the safest, the car's networks alone
+  the least.** Through the same tracker and planner, the hand-written
+  estimator never crashed or came within 0.43 m of a wall, where the car's
+  networks crash on YasMarina every time; its laps are 5.3% slower (run for
+  run), and it plans on too much free distance in 15% of scans (its
+  clearance counts what it doesn't see as free; its wide margin keeps that
+  safe here). The networks' better accuracy against the labels (LidarLaneNets.jl's
+  `train/results/networks.md`) doesn't make a safer car.
+- **Widths, sight and clearance measured in the scan make the networks
+  safe.** With them and the car's networks for the rest, no run crashed,
+  YasMarina included, at 0.5% more lap time; adding the cloud for
+  κ_profile alone (one call per scan), no run crashed at any latency, 100 ms
+  included (where every other combination crashes in 8 of 40 runs and the
+  cloud alone in 4), at the car's networks' lap times, and it plans on too
+  much free distance least often of all (3.0% of scans).
 - **Combining is safer than either tier alone at 25 and 50 ms.** With the
   cloud far ahead or for every estimate, no run crashed, and the car was
   within 0.2 m of a wall, or under 0.5 s from a collision, at most 0.02% of
@@ -183,8 +212,8 @@ The combinations that call the cloud's clearance (for every estimate, and
 round robin) plan on too much free distance in more scans than the car
 alone: 6.1–7.8% against 5.8%.
 
-Lap times differ little (78–81 s on average over the laps finished; the
-true estimates give 77.5 s). The configurations finish different sets of
+Lap times differ little (78–84 s on average over the laps finished, the
+hand-written estimator's the slowest; the true estimates give 77.5 s). The configurations finish different sets of
 laps (the car alone never finishes YasMarina), so compare them with the
 paired column of the full tables.
 

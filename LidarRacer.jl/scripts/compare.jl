@@ -10,12 +10,20 @@
 #
 # Configurations:
 # - small only:       the small networks on the car, no cloud.
+# - hand-written:     the hand-written estimator (LidarLaneEstimation.jl) for
+#                     every estimate, no cloud: the baseline the networks
+#                     should beat (same tracker, planner and controllers).
+# - small + scan geometry: the small networks for e, ψe and κ_profile;
+#                     widths, sight and clearance measured in the scan
+#                     (LidarLaneNets.ScanGeometry); no cloud.
 # - large only:       the cloud's networks for every estimate at every scan,
 #                     and nothing else (between results the filter predicts).
 # - both, every scan: small every scan, cloud for every estimate at every scan.
 # - round robin:      small every scan, cloud for one estimate per scan, in turn.
 # - far ahead:        small every scan, cloud for κ_profile, widths and sight
 #                     at every scan.
+# - scan geometry, cloud κ_profile: small + scan geometry, and the cloud for
+#                     κ_profile at every scan.
 #
 # Each configuration runs one lap of every held-out track once per seed. A
 # seed sets the LiDAR's noise and where the lap starts (seed k of n starts
@@ -30,12 +38,18 @@
 include("race.jl")
 using SpecialFunctions: beta_inc
 
+# (name, schedule, whether the car's results are used, where the car's
+# estimates come from: see race.jl's estimate_mix). Those that never call the
+# cloud run once, not at each latency.
 const CONFIGS = [
-    ("small only", NoCalls, true),
-    ("large only", AllCalls, false),
-    ("both, every scan", AllCalls, true),
-    ("round robin", RoundRobin, true),
-    ("far ahead", () -> FixedCalls(:κ_profile, :widths, :sight), true),
+    ("small only", NoCalls, true, :nets),
+    ("hand-written", NoCalls, true, :hand),
+    ("small + scan geometry", NoCalls, true, :geometric),
+    ("large only", AllCalls, false, :nets),
+    ("both, every scan", AllCalls, true, :nets),
+    ("round robin", RoundRobin, true, :nets),
+    ("far ahead", () -> FixedCalls(:κ_profile, :widths, :sight), true, :nets),
+    ("scan geometry, cloud κ_profile", () -> FixedCalls(:κ_profile), true, :geometric),
 ]
 
 # The two-sided 95% quantile of Student's t with `df` degrees of freedom:
@@ -76,15 +90,15 @@ end
 
 function compare(latencies_ms; seeds=5, weights=DEFAULT_WEIGHTS, small=:small_weak)
     nets = load_nets(weights; small)
-    tracking = TrackerConfig(noise=load_noise(weights; small))
+    tracking = Dict(src => TrackerConfig(noise=source_noise(src; weights, small)) for src in unique(last.(CONFIGS)))
     suffix = "-$small"
     F1Tenth.THREAD_AGENTS[] = false
     runs = [(track, k) for track in TEST_TRACKS for k in 1:seeds]
     # every configuration (and latency) to run
     configs = [(name, schedule, SelectorConfig(remote_latency=lat / 1000, use_small=use_small),
-        name == "small only" ? "–" : string(round(Int, lat)))
-               for lat in latencies_ms for (name, schedule, use_small) in CONFIGS
-               if lat == first(latencies_ms) || name != "small only"]   # no cloud, no latency
+        schedule === NoCalls ? "–" : string(round(Int, lat)), source)
+               for lat in latencies_ms for (name, schedule, use_small, source) in CONFIGS
+               if lat == first(latencies_ms) || schedule !== NoCalls]   # no cloud, no latency
     # every run of every configuration in one pool, so no thread waits for a
     # configuration's slowest run (each run has its own seed: the results
     # don't depend on the order)
@@ -92,11 +106,12 @@ function compare(latencies_ms; seeds=5, weights=DEFAULT_WEIGHTS, small=:small_we
     results = Matrix{RunResult}(undef, length(runs), length(configs))
     Threads.@threads :dynamic for j in eachindex(jobs)
         c, i = jobs[j]
-        name, schedule, selector, _ = configs[c]
+        name, schedule, selector, _, source = configs[c]
         track, k = runs[i]
-        results[i, c] = run_map(track; nets, schedule, selector, tracking, seed=1000k, pose=start_pose(track, k, seeds))
+        results[i, c] = run_map(track; nets, schedule, selector, source, tracking=tracking[source], seed=1000k,
+            pose=start_pose(track, k, seeds))
     end
-    rows = [(name, lat, results[:, c]) for (c, (name, _, _, lat)) in enumerate(configs)]
+    rows = [(name, lat, results[:, c]) for (c, (name, _, _, lat, _)) in enumerate(configs)]
     for (name, lat, rs) in rows
         println(name, ", ", lat, " ms: ", count(r -> r.finished, rs), " of ", length(rs), " laps")
     end

@@ -196,7 +196,9 @@ be measured against it.
 function lane_center(lane::LaneState, reach::Real)
     h, x, y = lane.ψe, -lane.e * sin(lane.ψe), lane.e * cos(lane.ψe)
     xs, ys, hs = [x - 0.5cos(h), x], [y - 0.5sin(h), y], [h, h]
-    wl, wr = [lane.w_left[1], lane.w_left[1]], [lane.w_right[1], lane.w_right[1]]
+    # unknown room beside the car (an estimator may give none) counts as none: follow the center
+    wl1, wr1 = (isfinite(w) ? w : 0.0 for w in (lane.w_left[1], lane.w_right[1]))
+    wl, wr = [wl1, wl1], [wr1, wr1]
     κp = lane.κ_profile
     for j in 2:length(PROFILE_S)
         PROFILE_S[j] > reach && break
@@ -261,7 +263,7 @@ end
 # The controller: what runs on the car, from a scan to a command
 
 """
-    Racer(car, beams, nets; schedule, selector, tracking, rng, stanley, margin, k_σ, latency, v_max)
+    Racer(car, beams, nets; schedule, selector, tracking, rng, mix, stanley, margin, k_σ, latency, v_max)
 
 The on-board controller of a car `car` (a [`CarParams`](@ref), or anything
 `CarParams` can read) with a LiDAR whose beams point at `beams` [rad],
@@ -272,7 +274,11 @@ networks are trained for the LiDAR's place on the car they were trained on
 which estimates to ask the cloud's large networks for at each scan, given
 the last lane state; `selector` and `tracking` tune LidarLaneNets.jl's
 selector and Kalman filter, and `rng` draws the simulated network's dropouts
-(`nothing`: the default random generator); the rest, the [`Planner`](@ref).
+(`nothing`: the default random generator). `mix`, a named tuple
+`(; source, estimates, σ)`, takes `estimates` from `source` instead of the
+car's networks (a `LidarLaneNets.MixedEstimator`: say, widths, sight and
+clearance measured in the scan by a `LidarLaneNets.ScanGeometry`); the rest,
+the [`Planner`](@ref).
 A scan is published `sweep` seconds after its first beam, and its command takes effect
 `latency` after that. `plan` holds the last [`Plan`](@ref).
 
@@ -292,13 +298,17 @@ mutable struct Racer{E}
 end
 
 function Racer(car::CarParams, beams, nets; schedule=RoundRobin(), selector=SelectorConfig(),
-               tracking=TrackerConfig(), rng=nothing,
+               tracking=TrackerConfig(), rng=nothing, mix=nothing,
                stanley=default_stanley(car), margin=default_margin(car), k_σ=1.0, latency=default_latency(),
                v_max=car.speed_cmd_max)
     sweep = scan_sweep(car, beams)
     planner = Planner(car; sweep, latency, stanley, margin, k_σ, v_max)
-    return Racer(TieredEstimator(nets; schedule, cfg=selector, rng), LaneTracker(car.lf + car.lr; cfg=tracking), planner,
-        sweep, latency, 0.0, 0.0, nothing, nothing)
+    estimator = TieredEstimator(nets; schedule, cfg=selector, rng)
+    if mix !== nothing
+        base = Set(mix.estimates) == Set(ESTIMATES) ? nothing : estimator
+        estimator = MixedEstimator(base, mix.source, mix.estimates, mix.σ)
+    end
+    return Racer(estimator, LaneTracker(car.lf + car.lr; cfg=tracking), planner, sweep, latency, 0.0, 0.0, nothing, nothing)
 end
 
 Racer(car, beams, nets; kwargs...) = Racer(CarParams(car), beams, nets; kwargs...)
