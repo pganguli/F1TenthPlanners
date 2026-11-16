@@ -1,6 +1,6 @@
 # Edge and cloud lane estimation: results
 
-This file summarizes the work on this branch (`dnn-estimators`): the car's networks (`small_weak`), the cloud's networks (`large`), and how the car combines them. The full tables are in:
+This file summarizes the work on this branch (`dnn-estimators`): the car's networks (`small_weak`), the cloud's networks (`large`), how the car combines them, and how they compare with the hand-written estimator and with estimates measured in the scan. The full tables are in:
 
 - [LidarLaneNets.jl/train/results/networks.md](LidarLaneNets.jl/train/results/networks.md): cost and accuracy of each network;
 - [LidarLaneNets.jl/train/results/errors.md](LidarLaneNets.jl/train/results/errors.md): the error distributions;
@@ -90,6 +90,19 @@ If the filter loses the lane, the car brakes to a stop and keeps its steering an
 | MACs per scan, all six networks | 0.11 M | 25.5 M | 238× |
 | Parameters, all six networks | 37 k | 4.29 M | 116× |
 | Time for one network, CPU | 0.03 ms | 0.27 ms | 9× |
+| Time for all six, one laptop core (measured) | 0.16 ms | 2.1 ms | 13× |
+| Time for all six, STM32H7A3 microcontroller (estimated) | 0.6 ms to 0.7 ms | 145 ms to 176 ms | 238× |
+| Size at int8 (the microcontroller has 2 MB flash) | 37 KB | 4.3 MB | 116× |
+
+Where the networks run:
+
+- **The car's networks run on a small perception processor**, a microcontroller of the class of the STM32H7A3 (Arm Cortex-M7, 280 MHz, 1.18 MB RAM, 2 MB flash).
+  - MLPerf Tiny v1.1 measured this board (ST's submission, int8, X-CUBE-AI 8.1) at 0.15 to 0.18 GMAC/s: keyword spotting (a CNN of 2.7 M MACs) at 65.1 inferences/s, and anomaly detection (a dense autoencoder of 0.26 M MACs) at 550 inferences/s. The times above are our MACs divided by that throughput.
+  - The car's six networks then take less than a tenth of the 7.5 ms from a scan to its command (the latency that ForzaETH measured for their race stack on NUC5).
+  - The cloud's six networks cannot run there: they need 6 to 7 scan periods (25 ms each) for one scan, and twice the flash.
+  - Our networks run in float32. Their accuracy at int8 is not checked.
+- **The cloud's compute is small against the network delay.** Narayanan et al. (WWW 2020) measured round trips over commercial 5G (Verizon mmWave): 27 ms to the first hop, 54 ms to a cloud region on the same coast, 82 ms across the country. This is approximately the 25 ms, 50 ms and 100 ms that we test.
+- NUC5's own computer (Intel i5-10210U) could run the large networks in a few ms. Thus the split assumes that the networks run on their own perception processor, not on the car's main computer.
 
 Each large network is a `small_strong` network plus a correction. The correction starts at zero. Thus a large network is never less accurate than its small_strong base on the validation tracks.
 
@@ -263,6 +276,21 @@ What this shows:
 - The large set has the most advantage for `clearance` and `sight`. It has almost no advantage for `widths`.
 - The errors of the two sets are correlated (0.61 to 0.99). For `widths` the correlation is 0.99. Thus the cloud adds almost no information for `widths`.
 - The networks know their own uncertainty. Approximately 65% of the errors are in $\pm 1\sigma$, which is close to the ideal 68%. For `κ_profile` and `sight`, small_weak gives a $\sigma$ that is too large (81% to 82% in $\pm 1\sigma$). This is a safe error.
+
+### 4.1 Widths, sight and clearance measured in the scan, without a network
+
+Three estimates are geometry that the scan shows directly: `widths`, `sight` and `clearance` ([`ScanGeometry`](LidarLaneNets.jl/src/geometry.jl)). It measures them as the labels are measured on the map, but in the scan. What the scan does not show (behind a wall, past 10 m, behind the car) counts as blocked. `widths` and `sight` are measured from the lane center that the car's networks give.
+
+| Estimate | small_weak | Measured in the scan |
+|---|---|---|
+| `clearance`, RMS error | 0.37 m | **0.32 m** |
+| `clearance`, more than 0.25 m too much free distance | 3.0% of the entries | **0.1%** |
+| `widths`, RMS error against the label | **0.10 m** | 0.19 m |
+| `widths`: walls, RMS distance to the true wall | 0.16 m | **0.12 m** |
+| `sight`, RMS error | **0.22 m** | 0.59 m |
+
+- The `widths` labels are measured from the true lane center. The widths measured in the scan are measured from the estimated center. Thus they miss the label by the error of the center, but they put the walls where the walls are. The planner needs the walls. (The cloud's networks: 0.09 m from the true wall. The hand-written estimator: 0.34 m.)
+- `sight` is measured along the estimated center. Far ahead, this center bends wrong when `κ_profile` is wrong.
 
 ## 5. How the errors are distributed
 
@@ -570,7 +598,7 @@ This example shows why the latency and the call rate are important. At 100 ms, t
 ### 8.1 The test
 
 - We used the 5 test tracks and 8 seeds, which gives 40 runs for each configuration. A seed sets the LiDAR noise and the start point.
-- The cloud latency was 25 ms, 50 ms or 100 ms. A public cloud over 5G gives approximately 50 ms.
+- The cloud latency was 25 ms, 50 ms or 100 ms. Over 5G, a round trip to a nearby cloud region takes approximately 54 ms (section 2).
 - We measured safety from the true map and the true car state.
 - The configurations:
 
@@ -581,18 +609,26 @@ This example shows why the latency and the call rate are important. At 100 ms, t
 | Combo, all | yes | all six estimates, each scan (6 calls) |
 | Combo, far ahead | yes | `κ_profile`, `widths`, `sight`, each scan (3 calls) |
 | Combo, round robin | yes | one estimate for each scan, in turn (1 call) |
+| Hand-written | no: the hand-written estimator for all six estimates | none |
+| Car + scan | for `e`, `ψe`, `κ_profile`; the other three measured in the scan | none |
+| Car + scan, cloud `κ_profile` | as car + scan | `κ_profile`, each scan (1 call) |
+
+All configurations use the same Kalman filter, planner and controllers. The noise of the hand-written estimator and of the scan measurements was measured on the validation tracks, as for the networks.
 
 ### 8.2 Crashes in 40 runs
 
 | Configuration | 25 ms | 50 ms | 100 ms |
 |---|---|---|---|
 | Car only | 8 | 8 | 8 |
-| Cloud only | 0 | 0 | 5 |
+| Hand-written | **0** | **0** | **0** |
+| Car + scan | **0** | **0** | **0** |
+| Cloud only | 0 | 0 | 4 |
 | Combo, all | **0** | **0** | 8 |
 | Combo, far ahead | **0** | **0** | 8 |
-| Combo, round robin | 4 | 8 | 8 |
+| Combo, round robin | 3 | 7 | 8 |
+| Car + scan, cloud `κ_profile` | **0** | **0** | **0** |
 
-The car-only row does not use the cloud. Thus it is the same at each latency.
+The car-only, hand-written and car + scan rows do not use the cloud. Thus they are the same at each latency. All crashes are on YasMarina, except those of the cloud alone at 100 ms (Monza).
 
 Some runs are on the edge. Reruns of code that differs only in the last bits of floating point moved most crash counts by at most one run. The cloud alone at 100 ms on Monza moved from 2 to 6 crashes: with results 4 scans late, the tiny differences grow over a lap.
 
@@ -600,30 +636,38 @@ Some runs are on the edge. Reruns of code that differs only in the last bits of 
 
 | Configuration | Closest to a wall, worst run | Closest to a wall, mean | Time within 0.2 m of a wall | Scans with time to collision under 0.5 s | Heading error (RMS) |
 |---|---|---|---|---|---|
-| Car only | 0.07 m | 0.27 m | 0.24% | 0.95% | 1.98° |
-| Cloud only | 0.10 m | 0.32 m | 0.16% | 0.14% | 1.96° |
-| Combo, all | **0.21 m** | 0.36 m | **0%** | **0.01%** | **1.26°** |
-| Combo, far ahead | **0.16 m** | 0.36 m | **0.01%** | **0.02%** | **1.26°** |
+| Car only | 0.07 m | 0.27 m | 0.24% | 0.95% | 1.93° |
+| Hand-written | **0.43 m** | **0.51 m** | **0%** | **0%** | 2.29° |
+| Car + scan | 0.07 m | 0.32 m | 0.14% | 0.05% | 1.44° |
+| Cloud only | 0.10 m | 0.33 m | 0.16% | 0.15% | 1.93° |
+| Combo, all | 0.19 m | 0.36 m | 0.02% | **0%** | **1.23°** |
+| Combo, far ahead | 0.19 m | 0.36 m | 0.01% | 0.01% | 1.25° |
+| Car + scan, cloud `κ_profile` | 0.16 m | 0.36 m | 0.01% | **0%** | 1.35° |
 
-At 25 ms, the worst run of the combination came no closer than 0.21 m (all and far ahead) to a wall. The cloud alone came to 0.10 m.
+At 25 ms, the worst run of the combination came no closer than 0.19 m (all) and 0.27 m (far ahead) to a wall. The cloud alone came to 0.10 m.
 
 ### 8.4 What the race results show
 
-1. **At 25 ms and 50 ms, the combination is safer than the car alone and the cloud alone.**
-   - No run crashed.
-   - The car was within 0.2 m of a wall, or under 0.5 s from a collision, for at most 0.02% of the time. The car alone: 0.24% and 0.95%.
-   - The closest distance to a wall in the worst run is 1.6 to 2 times that of the cloud alone.
-2. **"Far ahead" gives the same safety with half the cloud calls.** It also sets the speed for too much free distance less frequently than the car alone (4.9% of scans, against 6.0%), as the cloud alone does (5.3%).
-3. **Safety decreases when the latency increases.** At 100 ms, all combinations crash on YasMarina, as the car alone does. The cloud alone crashes on Monza (5 of 8 runs; 2 to 6 in reruns, see 8.2).
-4. **All crashes of a combination are on YasMarina.** In one hairpin, the car's `ψe` network has a bias of approximately 0.3 rad. Its usual bias is 0.02 rad. The cloud corrects this bias only when its results arrive frequently and quickly:
-   - Round robin calls `ψe` only on each 6th scan.
-   - At 100 ms, each cloud result is 4 scans old.
-5. **Lap times are almost the same.** The laps that finish take 75 s to 80 s, on average. The true estimates give 74.0 s. The configurations finish different sets of laps (the car alone never finishes YasMarina), so the full tables also compare lap times run for run. Lap time is not the objective.
+1. **The hand-written estimator is the safest configuration, and the car's networks alone are the least safe.**
+   - With the same filter, planner and controllers, the hand-written estimator never crashed, and never came closer than 0.43 m to a wall. The car's networks alone crash on YasMarina in each run.
+   - The cost: its laps are 5.3% slower (run for run against the car's networks). Its speed is set for too much free distance in 15% of the scans (the car's networks: 5.8%), because its `clearance` counts what it does not see as free. Its wide margin to the walls keeps this safe here.
+   - Thus the better RMS errors of the networks (section 4) do not give a safer car.
+2. **Widths, sight and clearance measured in the scan make the car's networks safe.**
+   - Car + scan: no crash, also on YasMarina, with the same networks for `e`, `ψe` and `κ_profile`. The laps are only 0.5% slower than with the car's networks alone.
+   - With the cloud for `κ_profile` only (1 call for each scan), there is no crash at any latency, also at 100 ms. At 100 ms each other combination crashes in 8 of 40 runs, and the cloud alone in 4. The lap times are the same as with the car's networks alone.
+   - Its speed is set for too much free distance in 3.0% of the scans: fewer than any other configuration.
+3. **At 25 ms and 50 ms, the network combinations are safer than the car alone and the cloud alone.**
+   - "Combo, all" and "far ahead": no run crashed. The car was within 0.2 m of a wall, or under 0.5 s from a collision, for at most 0.02% of the time. The car alone: 0.24% and 0.95%.
+   - The closest distance to a wall in the worst run is 1.9 to 2.7 times that of the cloud alone.
+   - "Far ahead" gives the same safety with half the cloud calls.
+4. **With the six networks, safety decreases when the latency increases.** At 100 ms, all network combinations crash on YasMarina, as the car alone does. The cloud alone crashes on Monza (4 of 8 runs; 2 to 6 in reruns, see 8.2). In one YasMarina hairpin, the car's `ψe` network has a bias of approximately 0.3 rad (its usual bias is 0.02 rad). The cloud corrects this bias only when its results arrive frequently and quickly. With the walls measured in the scan, the same bias does not cause a crash.
+5. **Lap times are almost the same.** The laps that finish take 78 s to 84 s, on average. The true estimates give 77.5 s. The configurations finish different sets of laps (the car alone never finishes YasMarina), so the full tables also compare lap times run for run. Lap time is not the objective.
 
 ### 8.5 Problems that stay open
 
-- **YasMarina at 100 ms and with round robin.** A schedule that adapts can call the cloud for `ψe` when the car goes into a tight corner. This is the first case for the sensitivity-informed schedule.
-- **Too much free distance.** The configurations that use the cloud's `clearance` (combo all, round robin) set the speed for too much free distance in more scans than the car alone (6.4% to 8.1%, against 6.0%). The filter possibly trusts the cloud's `clearance` too much.
+- **The cloud now matters only for `κ_profile`.** With the other estimates measured in the scan, one cloud call for each scan is enough at each latency we tested. The sensitivity analysis (TrajectorySensitivity.jl) still models `widths`, `sight` and `clearance` with the errors of the networks.
+- **The hand-written estimator's free distance.** Its `clearance` counts what it does not see as free (15% of the scans set the speed for too much free distance). The clearance measured in the scan does not have this problem.
+- **Too much free distance with the cloud's `clearance`.** The configurations that use it (combo all, round robin) set the speed for too much free distance in more scans than the car alone (6.1% to 7.8%, against 5.8%).
 
 ## 9. Reproducibility
 
